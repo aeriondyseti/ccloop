@@ -53,7 +53,11 @@ export function classifyStep(r: StepResult): StepClassification {
   }
 }
 
+import { truncateToWidth } from "../util/width.ts";
+
+/** Cap a step-failure excerpt to `max` visual columns (default 1024).
+ *  Width-aware so emoji and wide characters in error output don't
+ *  cause silent over-truncation or surrogate-pair splits. */
 export function capExcerpt(s: string, max = 1024): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
+  return truncateToWidth(s, max);
 }
