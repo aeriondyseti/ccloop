@@ -107,8 +107,12 @@ function useMenuKey(
   onMenuKey: ((key: MenuKey) => void) | undefined,
 ): void {
   const kb = useKeyboardAvailable();
-  useInput((input) => {
+  useInput((input, key) => {
     if (!onMenuKey) return;
+    // Ignore modified keys: Ctrl-C arrives as input="c" and would
+    // otherwise be parsed as the "continue" menu choice. Plain
+    // letter keys come through with no modifiers set.
+    if (key.ctrl || key.meta) return;
     const ch = input.toLowerCase() as MenuKey;
     if (allowed.includes(ch)) onMenuKey(ch);
   }, { isActive: kb && !!onMenuKey });

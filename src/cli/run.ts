@@ -330,8 +330,20 @@ export async function runRun(argv: string[]): Promise<number> {
       menuKeyHandler = (k) => {
         if (allowed.includes(k)) finish(k);
       };
-      // Force an immediate rerender so the new handler attaches
-      // without waiting for the next tick.
+      // Rebuild the view here, not just rerender. The orchestrator
+      // mutates state.state to "escalated" / "guardrail_trip" without
+      // emitting a bus event, so the cached `view` in the closure is
+      // still the last RUNNING build. Forcing a rerender with that
+      // stale view paints the Running component, which doesn't call
+      // useMenuKey — and the user mashes c/r/e/q at a screen that
+      // has no listener attached. Rebuilding here guarantees the
+      // very first frame after escalation hosts the correct screen
+      // *and* the handler.
+      view = buildView(
+        state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
+        cachedRecent, finalCommitSha,
+        undefined, interrupting, cadenceWait,
+      );
       ink.rerender(React.createElement(Dashboard, {
         view, onMenuKey: menuKeyHandler, onInterrupt,
       }));
