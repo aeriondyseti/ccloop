@@ -1,4 +1,4 @@
-import { Box, Text, useInput, useStdin } from "ink";
+import { Box, Text, useInput, useStdin, useStdout } from "ink";
 import React, { useEffect, useRef, useState } from "react";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import {
@@ -29,6 +29,13 @@ export function Dashboard({
   view, onMenuKey, onInterrupt,
 }: DashboardProps): React.ReactElement {
   useCtrlC(onInterrupt);
+  return <Frame>{pickScreen(view, onMenuKey)}</Frame>;
+}
+
+function pickScreen(
+  view: TuiViewModel,
+  onMenuKey?: (k: MenuKey) => void,
+): React.ReactElement {
   switch (view.state) {
     case "STARTING": return <Starting view={view} />;
     case "RUNNING":  return <Running view={view} />;
@@ -37,6 +44,39 @@ export function Dashboard({
     case "GUARDRAIL_TRIP": return <GuardrailTrip view={view} onMenuKey={onMenuKey} />;
     case "DONE": return <Done view={view} />;
   }
+}
+
+/** Sizes the outer container to the actual terminal dimensions so
+ *  flex children have a real viewport to lay out into. Without this,
+ *  the dashboard renders at intrinsic content height: it doesn't fill
+ *  the screen on first paint, flexGrow is a no-op so panes squeeze
+ *  out their borders, and successive repaints scroll-flicker because
+ *  each frame is a fresh block at the cursor position rather than an
+ *  in-place redraw of a known viewport. */
+function Frame({ children }: { children: React.ReactNode }): React.ReactElement {
+  const { rows, cols } = useTerminalSize();
+  return (
+    <Box width={cols} height={rows} flexDirection="column">
+      {children}
+    </Box>
+  );
+}
+
+function useTerminalSize(): { rows: number; cols: number } {
+  const { stdout } = useStdout();
+  const [size, setSize] = useState(() => ({
+    rows: stdout?.rows ?? 24,
+    cols: stdout?.columns ?? 80,
+  }));
+  useEffect(() => {
+    if (!stdout) return;
+    const onResize = (): void => {
+      setSize({ rows: stdout.rows, cols: stdout.columns });
+    };
+    stdout.on("resize", onResize);
+    return () => { stdout.off("resize", onResize); };
+  }, [stdout]);
+  return size;
 }
 
 /** Catch Ctrl+C ourselves. Ink is configured with
