@@ -60,6 +60,7 @@ export async function runLoop(
   const { config, paths, driver, bus, abortSignal } = opts;
   const now = opts.now ?? (() => Date.now());
   const rateLimit: RateLimitState = freshRateLimitState();
+  let usageDegradedWarned = false;
 
   while (!abortSignal.aborted) {
     // Re-enter pause if state already paused (continue case).
@@ -100,6 +101,17 @@ export async function runLoop(
           reason: decision.reason,
         });
         return { kind: "escalated", reason: decision.reason };
+      }
+      if (decision.kind === "proceed" && decision.degraded && !usageDegradedWarned) {
+        usageDegradedWarned = true;
+        bus.emit({
+          ts: nowIso(now),
+          run_id: state.run_id,
+          step: state.current_step,
+          type: "usage_degraded",
+          status: decision.degraded.status,
+          reason: decision.degraded.reason,
+        });
       }
     }
 
@@ -198,26 +210,35 @@ export async function runLoop(
   return { kind: "cancelled" };
 }
 
+export interface UsageDegradedWarning {
+  status: number | null;
+  reason: string;
+}
+
 async function checkUsageGate(
   usage: UsageClient,
   config: CcloopConfig,
 ): Promise<
-  | { kind: "proceed" }
+  | { kind: "proceed"; degraded?: UsageDegradedWarning }
   | { kind: "pause"; until: IsoTimestamp; reason: string }
   | { kind: "escalate"; reason: string }
 > {
   const got: UsageResult = await usage.get();
   let snapshot: UsageSnapshot | null = null;
+  let degraded: UsageDegradedWarning | undefined;
   if (got.kind === "ok") snapshot = got.snapshot;
-  else if (got.kind === "rate_limited" || got.kind === "shape_mismatch" || got.kind === "network_error") {
-    snapshot = got.lastGood;
-  } else if (got.kind === "auth_error") {
+  else if (got.kind === "auth_error") {
     return {
       kind: "escalate",
       reason: `usage endpoint auth_error (HTTP ${got.status}); rotate token`,
     };
+  } else {
+    snapshot = got.lastGood;
+    degraded = describeDegradation(got);
   }
-  if (!snapshot) return { kind: "proceed" };
+  if (!snapshot) {
+    return degraded ? { kind: "proceed", degraded } : { kind: "proceed" };
+  }
   const thresholds: UsageThresholds = {
     pauseAtUtilization: config.loop.pause_at_utilization,
     escalateAtUtilization: config.loop.escalate_at_utilization,
@@ -226,7 +247,39 @@ async function checkUsageGate(
   const d = decideUsage(snapshot, thresholds);
   if (d.action === "pause") return { kind: "pause", until: d.until, reason: d.reason };
   if (d.action === "escalate") return { kind: "escalate", reason: d.reason };
-  return { kind: "proceed" };
+  return degraded ? { kind: "proceed", degraded } : { kind: "proceed" };
+}
+
+function describeDegradation(got: UsageResult): UsageDegradedWarning | undefined {
+  if (got.kind === "endpoint_unavailable") {
+    // 403 is almost always the `claude setup-token` scope case: the
+    // token has `user:inference` but `/api/oauth/usage` requires
+    // `user:profile`. Re-auth via `claude /login` to enable proactive
+    // gating. Reactive limit detection still works without this.
+    return {
+      status: got.status,
+      reason: `usage endpoint forbidden (HTTP ${got.status}); token likely lacks user:profile scope. Re-auth via 'claude /login' to enable proactive gating. Falling back to reactive-only detection.`,
+    };
+  }
+  if (got.kind === "rate_limited") {
+    return {
+      status: 429,
+      reason: "usage endpoint rate-limited (HTTP 429); falling back to reactive-only detection.",
+    };
+  }
+  if (got.kind === "shape_mismatch") {
+    return {
+      status: null,
+      reason: "usage endpoint returned unexpected shape; falling back to reactive-only detection.",
+    };
+  }
+  if (got.kind === "network_error") {
+    return {
+      status: null,
+      reason: `usage endpoint unreachable (${got.error}); falling back to reactive-only detection.`,
+    };
+  }
+  return undefined;
 }
 
 async function waitOutPause(

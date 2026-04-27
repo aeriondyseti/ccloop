@@ -17,6 +17,7 @@ export type EventType =
   | "guardrail_trip"
   | "notification_sent"
   | "compact_boundary"
+  | "usage_degraded"
   | "done";
 
 export interface EventBase {

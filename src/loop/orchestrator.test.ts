@@ -270,6 +270,56 @@ describe("runLoop", () => {
     expect(r).toMatchObject({ kind: "escalated", reason: expect.stringMatching(/auth_error/) });
   });
 
+  test("usage gate endpoint_unavailable does NOT escalate, emits usage_degraded once", async () => {
+    const cfg = structuredClone(DEFAULTS);
+    cfg.loop.target_cadence_seconds = 0;
+    const bus = new EventBus<DriverEvent>();
+    const driver = fakeDriver([{ kind: "done", finalCommitSha: asSha("ok123") }]);
+    const ac = new AbortController();
+    const usage = fakeUsage([
+      { kind: "endpoint_unavailable", status: 403, lastGood: null },
+    ]);
+    const events: DriverEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    const r = await runLoop(freshState(), {
+      config: cfg, paths: runtimePaths(dir), driver, bus,
+      abortSignal: ac.signal, usage,
+      notifyOptions: { pushUrl: "", webhookUrl: "" },
+    });
+    expect(r.kind).toBe("done");
+    const degraded = events.filter((e) => e.type === "usage_degraded");
+    expect(degraded.length).toBe(1);
+    expect(degraded[0]).toMatchObject({
+      type: "usage_degraded",
+      status: 403,
+      reason: expect.stringMatching(/user:profile|forbidden/i),
+    });
+  });
+
+  test("usage gate emits usage_degraded only once across multiple steps", async () => {
+    const cfg = structuredClone(DEFAULTS);
+    cfg.loop.target_cadence_seconds = 0;
+    const bus = new EventBus<DriverEvent>();
+    const driver = fakeDriver([
+      { kind: "ran", result: { kind: "ok", finalCommitSha: asSha("aaa") } as never, outcome: "no-op" },
+      { kind: "done", finalCommitSha: asSha("bbb") },
+    ]);
+    const ac = new AbortController();
+    const usage = fakeUsage([
+      { kind: "endpoint_unavailable", status: 403, lastGood: null },
+      { kind: "endpoint_unavailable", status: 403, lastGood: null },
+    ]);
+    const events: DriverEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    await runLoop(freshState(), {
+      config: cfg, paths: runtimePaths(dir), driver, bus,
+      abortSignal: ac.signal, usage,
+      notifyOptions: { pushUrl: "", webhookUrl: "" },
+    });
+    const degraded = events.filter((e) => e.type === "usage_degraded");
+    expect(degraded.length).toBe(1);
+  });
+
   test("rate-limit error with parseable reset pauses then resumes", async () => {
     const cfg = structuredClone(DEFAULTS);
     cfg.loop.target_cadence_seconds = 0;

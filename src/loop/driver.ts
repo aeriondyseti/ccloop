@@ -47,7 +47,8 @@ export type DriverEvent =
   | (EventBase & { type: "guardrail_trip"; which: string; limit: unknown; actual: unknown })
   | (EventBase & { type: "escalate"; reason: string })
   | (EventBase & { type: "pause_enter"; reason: string; until: IsoTimestamp; window: string })
-  | (EventBase & { type: "pause_exit"; wake_reason: string });
+  | (EventBase & { type: "pause_exit"; wake_reason: string })
+  | (EventBase & { type: "usage_degraded"; status: number | null; reason: string });
 
 export type StepStatus =
   | { kind: "done"; finalCommitSha: Sha }

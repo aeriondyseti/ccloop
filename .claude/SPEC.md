@@ -721,11 +721,19 @@ responses gracefully; ccloop falls back to reactive-only detection
 
 Failure modes:
 
-- 429 (broken endpoint, known case for some Max subscribers): keep
-  last good cache; proceed; reactive-only as safety net.
-- Auth error: surface to user as a token-rotation prompt; pause
-  indefinitely until resolved (escalation event).
-- Shape mismatch: warn; fall back to reactive-only.
+- 429 (broken endpoint, known case for some Max subscribers — see
+  anthropics/claude-code#30930, #31021): keep last good cache; proceed;
+  reactive-only as safety net.
+- 403: token is valid but lacks the `user:profile` scope this
+  endpoint requires. `claude setup-token` issues `user:inference`
+  only; the full `claude /login` OAuth flow grants `user:profile`.
+  ccloop emits a one-time `usage_degraded` event explaining this and
+  falls back to reactive-only — the proactive gate is advisory, so
+  halting the run over a missing scope is wrong.
+- 401: token genuinely invalid. Surface as a token-rotation prompt;
+  pause indefinitely until resolved (escalation event).
+- Shape mismatch / network error: emit `usage_degraded`; fall back
+  to reactive-only.
 
 ### 7.7 What the dashboard surfaces
 

@@ -9,6 +9,11 @@
  * tolerant — unknown fields are ignored, malformed shapes return
  * `kind: "shape_mismatch"` so the loop falls back to reactive-only
  * detection (§7.6 / §14.2).
+ *
+ * Status mapping: 401 → auth_error (token rotation needed). 403/429 →
+ * endpoint_unavailable / rate_limited respectively (the endpoint is
+ * known to flap on Max subscribers — §7.6); the loop treats these as
+ * non-fatal and falls back to reactive detection.
  */
 
 import { type IsoTimestamp, asIsoTimestamp } from "../branded.ts";
@@ -32,6 +37,7 @@ export type UsageResult =
   | { kind: "ok"; snapshot: UsageSnapshot }
   | { kind: "rate_limited"; lastGood: UsageSnapshot | null }
   | { kind: "auth_error"; status: number }
+  | { kind: "endpoint_unavailable"; status: number; lastGood: UsageSnapshot | null }
   | { kind: "shape_mismatch"; lastGood: UsageSnapshot | null }
   | { kind: "network_error"; error: string; lastGood: UsageSnapshot | null };
 
@@ -86,8 +92,14 @@ export class UsageClient {
     if (res.status === 429) {
       return { kind: "rate_limited", lastGood: this.cache };
     }
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       return { kind: "auth_error", status: res.status };
+    }
+    if (res.status === 403) {
+      // The usage endpoint is known to flap between 403 and 429 for
+      // some Max subscribers (§7.6). Treat 403 as endpoint trouble,
+      // not token trouble — let the loop fall back to reactive-only.
+      return { kind: "endpoint_unavailable", status: res.status, lastGood: this.cache };
     }
     if (!res.ok) {
       return {
