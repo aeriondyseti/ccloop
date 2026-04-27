@@ -19,8 +19,11 @@ Common flags for \`ccloop run\`:
   --log-level LEVEL       debug | info | warn | error
   --no-color              disable ANSI
 
-Required environment:
-  CLAUDE_CODE_OAUTH_TOKEN  generate with: claude setup-token
+Authentication (one of):
+  CLAUDE_CODE_OAUTH_TOKEN  long-lived; generate with: claude setup-token
+  claude /login            ccloop reads keychain (macOS) or
+                           ~/.claude/.credentials.json automatically
+  ANTHROPIC_API_KEY        billing API key
 
 Files (in current directory):
   SPEC.md                 required: spec to drive against
