@@ -1,5 +1,6 @@
 import { Box, Text, useInput, useStdin, useStdout } from "ink";
 import React, { useEffect, useRef, useState } from "react";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
 import {
   formatBar, formatCost, formatCountdown, formatDuration,
@@ -85,8 +86,43 @@ function useTerminalSize(): { rows: number; cols: number } {
 function useCtrlC(onInterrupt: (() => void) | undefined): void {
   const kb = useKeyboardAvailable();
   useInput((input, key) => {
+    debugKey("ctrlc-watch", input, key);
     if (key.ctrl && input === "c") onInterrupt?.();
   }, { isActive: kb && !!onInterrupt });
+}
+
+/** Opt-in keystroke logger. Enable with `CCLOOP_TUI_DEBUG=1`. Writes
+ *  one JSONL line per dispatched key to `./.ccloop/tui-debug.log`,
+ *  including which hook saw it. Used to diagnose "key doesn't reach
+ *  the handler" reports without instrumenting prod conditionally —
+ *  the no-op path is a single env-var read. */
+const TUI_DEBUG = process.env.CCLOOP_TUI_DEBUG === "1";
+function debugKey(
+  source: string,
+  input: string,
+  key: Record<string, unknown>,
+): void {
+  if (!TUI_DEBUG) return;
+  try {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      source,
+      input,
+      inputCodes: [...input].map((c) => c.charCodeAt(0)),
+      key: {
+        ctrl: key.ctrl, meta: key.meta, shift: key.shift,
+        upArrow: key.upArrow, downArrow: key.downArrow,
+        tab: key.tab, return: key.return, escape: key.escape,
+      },
+    }) + "\n";
+    // Sync append so we don't lose entries on crash, and so multiple
+    // hooks logging in the same dispatch don't race. Cheap; off by
+    // default.
+    mkdirSync(".ccloop", { recursive: true });
+    appendFileSync(".ccloop/tui-debug.log", line);
+  } catch {
+    // Logging must never break the TUI.
+  }
 }
 
 /** True when the runtime can put stdin into raw mode. Without this,
@@ -108,6 +144,7 @@ function useMenuKey(
 ): void {
   const kb = useKeyboardAvailable();
   useInput((input, key) => {
+    debugKey(`menu(allowed=${allowed.join("")},active=${!!onMenuKey})`, input, key);
     if (!onMenuKey) return;
     // Ignore modified keys: Ctrl-C arrives as input="c" and would
     // otherwise be parsed as the "continue" menu choice. Plain

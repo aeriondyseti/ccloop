@@ -194,62 +194,57 @@ export async function runRun(argv: string[]): Promise<number> {
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
 
-  // 9. TUI: render via ink. Renders are dirty-driven — the tick wakes
-  // up at TUI_TICK_MS but only repaints if a buffer changed or the
-  // heartbeat needs to flip. At 4Hz with full-frame terminal redraws,
-  // unconditional rerendering visibly flickers on borderbox layouts.
-  let view: TuiViewModel = { ...EMPTY_VIEW, cwd, runId: state.run_id, step: state.current_step };
+  // 9. TUI: pure-projection render loop.
+  //
+  // The tick rebuilds the view from the current state on every fire
+  // and rerenders unconditionally. Ink's diff renderer makes a no-op
+  // rerender free; with the alt-screen + Frame fixes in place, there
+  // are no flicker concerns at 4 Hz.
+  //
+  // History: an earlier design gated rerenders on a `viewDirty` flag
+  // that bus subscribers had to set. Direct state mutations
+  // (applyEscalation, applyPause, …) emit no bus event, which left
+  // the view-update path silently divergent from the state machine
+  // for up to one heartbeat. That produced a class of bugs ("the
+  // ESCALATED screen is up but the menu keys aren't wired" being the
+  // most visible). Single source of truth — current `state` — and a
+  // single render path eliminates the class entirely.
   let logBuffer: string[] = [];
   let nowBuffer: import("../tui/types.ts").TurnEvent[] = [];
   let heartbeat: "●" | "○" = "●";
   let lastHeartbeatToggleMs = Date.now();
-  let viewDirty = true;
   let finalCommitSha = "";
-  let stepsDirty = true;
   let cachedRecent: import("../loop/stepRecord.ts").StepRecord[] = [];
+  let stepsDirty = true;
   let interrupting = false;
   let firstInterruptAt = 0;
   let cadenceWait: { startedAt: string; totalMs: number } | null = null;
   bus.subscribe((e) => {
     if (e.type === "stream_chunk") {
       nowBuffer = [...nowBuffer, e.turn];
-      viewDirty = true;
       return;
     }
     if (e.type === "cadence_wait_enter") {
       cadenceWait = { startedAt: e.started_at, totalMs: e.total_ms };
-      viewDirty = true;
       return;
     }
     if (e.type === "cadence_wait_exit") {
       cadenceWait = null;
-      viewDirty = true;
       return;
     }
     if (e.type === "step_start") {
-      // New step begins — clear the now pane so it shows only the
-      // current step's stream.
       nowBuffer = [];
-      viewDirty = true;
     }
     const line = eventToLine(e);
-    if (line) {
-      logBuffer = [...logBuffer, line].slice(-LOG_CAP);
-      viewDirty = true;
-    }
-    if (e.type === "step_end") {
-      stepsDirty = true;
-      viewDirty = true;
-    }
+    if (line) logBuffer = [...logBuffer, line].slice(-LOG_CAP);
+    if (e.type === "step_end") stepsDirty = true;
     if (e.type === "done" && "final_commit_sha" in e) {
       finalCommitSha = String(e.final_commit_sha);
-      viewDirty = true;
     }
   });
   // Closure-shared menu key handler. Set during ESCALATED /
-  // GUARDRAIL_TRIP single-key prompts; tick timer threads it through
-  // every rerender so Ink's useInput in those screens has somewhere
-  // to dispatch keystrokes.
+  // GUARDRAIL_TRIP prompts; the tick threads it through Dashboard
+  // props on every render so useMenuKey has a current handler.
   let menuKeyHandler: ((key: MenuKey) => void) | null = null;
   const onInterrupt = (): void => {
     const now = Date.now();
@@ -263,7 +258,18 @@ export async function runRun(argv: string[]): Promise<number> {
     interrupting = true;
     firstInterruptAt = now;
     aborter.abort();
-    viewDirty = true;
+  };
+
+  let view: TuiViewModel = { ...EMPTY_VIEW, cwd, runId: state.run_id, step: state.current_step };
+  const renderNow = (): void => {
+    view = buildView(
+      state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
+      cachedRecent, finalCommitSha,
+      undefined, interrupting, cadenceWait,
+    );
+    ink.rerender(React.createElement(Dashboard, {
+      view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
+    }));
   };
   // Alt-screen: claim the whole terminal for the dashboard. Frame
   // history doesn't pollute scrollback, and scroll-wheel input has
@@ -284,33 +290,20 @@ export async function runRun(argv: string[]): Promise<number> {
     exitOnCtrlC: false,
   });
   if (usageClient) void usageClient.get();
-  const usagePollTimer = usageClient ? setInterval(() => {
-    void usageClient.get();
-    viewDirty = true;
-  }, 30_000) : null;
+  const usagePollTimer = usageClient
+    ? setInterval(() => { void usageClient.get(); }, 30_000)
+    : null;
   const tickTimer = setInterval(async () => {
     if (stepsDirty) {
       cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
       stepsDirty = false;
-      viewDirty = true;
     }
     const now = Date.now();
-    let beat = false;
     if (now - lastHeartbeatToggleMs >= HEARTBEAT_INTERVAL_MS) {
       heartbeat = heartbeat === "●" ? "○" : "●";
       lastHeartbeatToggleMs = now;
-      beat = true;
     }
-    if (!viewDirty && !beat) return;
-    viewDirty = false;
-    view = buildView(
-      state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
-      cachedRecent, finalCommitSha,
-      undefined, interrupting, cadenceWait,
-    );
-    ink.rerender(React.createElement(Dashboard, {
-      view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
-    }));
+    renderNow();
   }, TUI_TICK_MS);
 
   const readMenuKey = (
@@ -330,23 +323,12 @@ export async function runRun(argv: string[]): Promise<number> {
       menuKeyHandler = (k) => {
         if (allowed.includes(k)) finish(k);
       };
-      // Rebuild the view here, not just rerender. The orchestrator
-      // mutates state.state to "escalated" / "guardrail_trip" without
-      // emitting a bus event, so the cached `view` in the closure is
-      // still the last RUNNING build. Forcing a rerender with that
-      // stale view paints the Running component, which doesn't call
-      // useMenuKey — and the user mashes c/r/e/q at a screen that
-      // has no listener attached. Rebuilding here guarantees the
-      // very first frame after escalation hosts the correct screen
-      // *and* the handler.
-      view = buildView(
-        state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
-        cachedRecent, finalCommitSha,
-        undefined, interrupting, cadenceWait,
-      );
-      ink.rerender(React.createElement(Dashboard, {
-        view, onMenuKey: menuKeyHandler, onInterrupt,
-      }));
+      // Force an immediate paint with the new handler attached so
+      // the user doesn't wait up to one tick for the menu to become
+      // responsive. State has already mutated upstream — renderNow
+      // reads `state` fresh, so the correct screen + handler land
+      // in a single rerender.
+      renderNow();
       if (abortSignal.aborted) return finish("q");
       abortSignal.addEventListener("abort", onAbort, { once: true });
     });
@@ -385,12 +367,8 @@ export async function runRun(argv: string[]): Promise<number> {
     clearInterval(tickTimer);
     if (usagePollTimer) clearInterval(usagePollTimer);
     cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
-    view = buildView(
-      state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
-      cachedRecent, finalCommitSha,
-      undefined, interrupting, cadenceWait,
-    );
-    ink.rerender(React.createElement(Dashboard, { view }));
+    menuKeyHandler = null; // suppress key wiring on the final paint
+    renderNow();
     ink.unmount();
     leaveAltScreen();
     process.off("exit", leaveAltScreen);
