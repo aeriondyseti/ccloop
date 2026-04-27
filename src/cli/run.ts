@@ -257,6 +257,7 @@ export async function runRun(argv: string[]): Promise<number> {
       // Second press within the grace window — give up on graceful
       // shutdown. Restore terminal and bail.
       ink.unmount();
+      leaveAltScreen();
       process.exit(130);
     }
     interrupting = true;
@@ -264,6 +265,21 @@ export async function runRun(argv: string[]): Promise<number> {
     aborter.abort();
     viewDirty = true;
   };
+  // Alt-screen: claim the whole terminal for the dashboard. Frame
+  // history doesn't pollute scrollback, and scroll-wheel input has
+  // nothing to scroll in the alt buffer (terminals translate wheel
+  // events to arrow keys there, which our scroll panes handle).
+  // Registered on `exit` so abnormal shutdowns still restore the
+  // user's terminal.
+  const enterAltScreen = (): void => {
+    process.stdout.write("\x1b[?1049h\x1b[?25l");
+  };
+  const leaveAltScreen = (): void => {
+    process.stdout.write("\x1b[?25h\x1b[?1049l");
+  };
+  enterAltScreen();
+  process.on("exit", leaveAltScreen);
+
   const ink = render(React.createElement(Dashboard, { view, onInterrupt }), {
     exitOnCtrlC: false,
   });
@@ -364,6 +380,8 @@ export async function runRun(argv: string[]): Promise<number> {
     );
     ink.rerender(React.createElement(Dashboard, { view }));
     ink.unmount();
+    leaveAltScreen();
+    process.off("exit", leaveAltScreen);
     process.off("SIGINT", onSigInt);
     process.off("SIGTERM", onSigTerm);
     if (release) await release();
