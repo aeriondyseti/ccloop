@@ -1,0 +1,82 @@
+# ccloop configuration. All keys shown here are at their defaults —
+# delete or override what you don't need to change.
+
+schema_version = 1
+
+[loop]
+# Hard cap on total steps in this run. 0 disables.
+max_steps = 200
+
+# Hard cap on wall-clock time across all instances of this run.
+# Pause time is not counted; cadence-sleep time is. Empty disables.
+# Format: parse-duration. Examples: "8h", "30m", "1d 2h", "1.5h".
+max_wall_clock = "8h"
+
+# Target time between step starts (seconds). If a step's own duration
+# exceeds this, the loop runs as fast as steps complete. 0 disables.
+target_cadence_seconds = 240
+
+# Window-utilization thresholds (percent, 0-100), checked against
+# Anthropic's /api/oauth/usage endpoint pre-flight on every step.
+# - five_hour: pause-and-resume.
+# - seven_day: escalate-and-stop.
+pause_at_utilization    = 95.0
+escalate_at_utilization = 80.0
+
+# Fallback sleep when a reactive rate-limit error has no parseable
+# reset time (seconds).
+rate_limit_default_pause_seconds = 3600
+
+[claude]
+# false: permissionMode = "acceptEdits"; non-edit Bash routed through
+#        bwrap (Linux) / sandbox-exec (macOS) scoped to CWD; denylist
+#        of catastrophic patterns applied.
+# true:  permissionMode = "bypassPermissions"; no scoping. ccloop
+#        warns on every instance start when this is on.
+yolo_mode = false
+
+# SDK's maxTurns. Bounds Anthropic-turns per ccloop step. (Anthropic
+# "turn" = ccloop "inference"; see SPEC §2.5.)
+max_turns_per_step = 50
+
+# How many auto-continuations after stop_reason="pause_turn" within
+# the same ccloop step before giving up.
+max_continuations_per_step = 5
+
+# SDK reasoning effort. "xhigh" recommended on Opus 4.7.
+effort = "xhigh"
+
+[failure]
+# After this many consecutive step failures, escalate.
+consecutive_failures_before_escalation = 3
+
+# Backoff between retries, indexed by failure count (seconds).
+backoff = [30, 60, 120]
+
+# After this many successful steps with the same git diff, treat the
+# current step as stuck (loop_detected) and contribute to escalation.
+loop_detection_repeats = 3
+
+# After this many consecutive no-op steps (working tree unchanged),
+# escalate with reason "no_progress".
+no_progress_threshold = 5
+
+[notify]
+# Optional. HTTP POST text/plain. Designed for ntfy.sh, Pushover, etc.
+push_url = ""
+
+# Optional. HTTP POST application/json. For Slack incoming hooks,
+# custom dispatchers, etc.
+webhook_url = ""
+
+# Notify if a single pause exceeds this many seconds.
+pause_alert_seconds = 1800
+
+# Notify on successful run completion.
+notify_on_done = false
+
+[prompt]
+# Optional path to a custom prompt template, replacing the default
+# embedded one. Mustache-style substitutions: {{spec}}, {{progress}},
+# {{last_error}}, {{step}}.
+template_path = ""

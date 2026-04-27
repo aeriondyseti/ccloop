@@ -1,0 +1,10 @@
+node_modules/
+.ccloop/
+**/.ccloop/
+*.log
+.DS_Store
+bun.lockb
+.env
+.env.*
+!.env.example
+DONE.md

@@ -1,0 +1,140 @@
+/**
+ * Anthropic OAuth usage endpoint client per §7.6.
+ *
+ * Endpoint: GET https://api.anthropic.com/api/oauth/usage
+ *   Authorization: Bearer ${CLAUDE_CODE_OAUTH_TOKEN}
+ *   anthropic-beta: oauth-2025-04-20
+ *
+ * Schema is undocumented and shifts; the validator is deliberately
+ * tolerant — unknown fields are ignored, malformed shapes return
+ * `kind: "shape_mismatch"` so the loop falls back to reactive-only
+ * detection (§7.6 / §14.2).
+ */
+
+import { type IsoTimestamp, asIsoTimestamp } from "../branded.ts";
+
+const ENDPOINT = "https://api.anthropic.com/api/oauth/usage";
+const BETA = "oauth-2025-04-20";
+const DEFAULT_CACHE_TTL_MS = 180_000;
+
+export interface UsageWindow {
+  utilization: number;       // 0-100
+  resets_at: IsoTimestamp;
+}
+
+export interface UsageSnapshot {
+  five_hour: UsageWindow;
+  seven_day: UsageWindow;
+  fetched_at: number;        // Date.now()
+}
+
+export type UsageResult =
+  | { kind: "ok"; snapshot: UsageSnapshot }
+  | { kind: "rate_limited"; lastGood: UsageSnapshot | null }
+  | { kind: "auth_error"; status: number }
+  | { kind: "shape_mismatch"; lastGood: UsageSnapshot | null }
+  | { kind: "network_error"; error: string; lastGood: UsageSnapshot | null };
+
+export interface UsageClientOptions {
+  token: string;
+  ttlMs?: number;
+  fetchImpl?: typeof fetch;
+  /** Test seam: read-only injection of the cache. */
+  now?: () => number;
+}
+
+export class UsageClient {
+  private cache: UsageSnapshot | null = null;
+  private readonly ttlMs: number;
+  private readonly fetchImpl: typeof fetch;
+  private readonly now: () => number;
+
+  constructor(private readonly options: UsageClientOptions) {
+    this.ttlMs = options.ttlMs ?? DEFAULT_CACHE_TTL_MS;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.now = options.now ?? Date.now;
+  }
+
+  /** Returns the cached snapshot if still fresh, else fetches. */
+  async get(): Promise<UsageResult> {
+    if (this.cache && this.now() - this.cache.fetched_at < this.ttlMs) {
+      return { kind: "ok", snapshot: this.cache };
+    }
+    return await this.refresh();
+  }
+
+  /** Force-refresh, bypassing the cache window. */
+  async refresh(): Promise<UsageResult> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(ENDPOINT, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${this.options.token}`,
+          "anthropic-beta": BETA,
+          Accept: "application/json",
+        },
+      });
+    } catch (err) {
+      return {
+        kind: "network_error",
+        error: (err as Error).message,
+        lastGood: this.cache,
+      };
+    }
+
+    if (res.status === 429) {
+      return { kind: "rate_limited", lastGood: this.cache };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { kind: "auth_error", status: res.status };
+    }
+    if (!res.ok) {
+      return {
+        kind: "network_error",
+        error: `HTTP ${res.status}`,
+        lastGood: this.cache,
+      };
+    }
+
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (err) {
+      return { kind: "shape_mismatch", lastGood: this.cache };
+    }
+    const parsed = parseUsageBody(body, this.now());
+    if (!parsed) return { kind: "shape_mismatch", lastGood: this.cache };
+    this.cache = parsed;
+    return { kind: "ok", snapshot: parsed };
+  }
+
+  /** Last known good snapshot, or null. Synchronous; never fetches. */
+  lastSnapshot(): UsageSnapshot | null {
+    return this.cache;
+  }
+
+  /** Test seam. */
+  primeCache(snapshot: UsageSnapshot): void {
+    this.cache = snapshot;
+  }
+}
+
+export function parseUsageBody(body: unknown, fetchedAt: number): UsageSnapshot | null {
+  if (typeof body !== "object" || body === null) return null;
+  const b = body as Record<string, unknown>;
+  const five = parseWindow(b.five_hour);
+  const seven = parseWindow(b.seven_day);
+  if (!five || !seven) return null;
+  return { five_hour: five, seven_day: seven, fetched_at: fetchedAt };
+}
+
+function parseWindow(raw: unknown): UsageWindow | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const u = r.utilization;
+  const at = r.resets_at;
+  if (typeof u !== "number" || !Number.isFinite(u)) return null;
+  if (typeof at !== "string" || at.length === 0) return null;
+  return { utilization: u, resets_at: asIsoTimestamp(at) };
+}
