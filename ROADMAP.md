@@ -70,3 +70,33 @@ deliberately scoped out of the initial build.
   and push the initial commit. Needs design around auth assumptions
   (`gh auth status`), naming (derive from CWD?), and visibility
   (public vs. private default).
+
+- **Expanded DONE screen with step-by-step transcript review.** Today
+  the DONE screen shows the final commit SHA and rolling stats. Make
+  it the entrypoint for a richer post-mortem: navigate step-by-step
+  through the run, with each step exposing its full Now-pane
+  transcript (assistant prose, tool uses, tool results), commit
+  subject + diff, duration / cost / cache stats, and any failures or
+  retries. Open questions: source of truth — accumulate from
+  `stream_chunk` events into per-step transcript files
+  (`.ccloop/steps/NNNN.transcript.md`) at end-of-step, vs. read the
+  SDK's `~/.claude/projects/<proj>/<sid>.jsonl` lazily; navigation
+  model — keys (←/→, j/k?), or a step picker; interaction with
+  ESCALATED's revert flow (probably share the step picker UI).
+
+- **First-class brownfield SPEC implementation.** MVP is greenfield-
+  shaped: `ccloop init` assumes an empty (or near-empty) tree, the
+  matrix refuses non-greenfield starts unless `--continue` is set,
+  the prompt template implicitly tells Claude it's scaffolding from
+  scratch, and DONE detection is "ship it once the checklist is
+  done" rather than "ship the focused change." Brownfield support
+  needs: (1) a startup matrix that accepts a populated repo without
+  treating it as dirty-tree recovery, (2) a prompt template variant
+  that orients Claude inside an existing codebase (pointers to
+  CLAUDE.md / READMEs / module layout, ground rules about not
+  rewriting unrelated code), (3) SPEC conventions for change-shaped
+  work (acceptance criteria + test plan, not just checklist
+  scaffolding), (4) likely a separate "review-mode" iteration shape
+  where the loop converges on a passing test/lint signal rather than
+  a `DONE.md` sentinel. Decide whether this is a config flag
+  (`[run].mode = "brownfield"`) or implicit from project state.

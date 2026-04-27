@@ -502,11 +502,11 @@ step as ended.
 |---|---|---|
 | `includePartialMessages` | `true` | Drives live TUI from streamed events. |
 | `maxTurns` | from `[claude].max_turns_per_step` (default `50`) | Anthropic's `maxTurns` — bounds Anthropic-turns per step (= inferences in ccloop's vocabulary; see §2.5). |
-| `permissionMode` | derived from `[claude].yolo_mode`: `false` → `"acceptEdits"`, `true` → `"bypassPermissions"` | See §6.5. |
+| `permissionMode` | derived from `[claude].yolo_mode`: `false` → `"default"`, `true` → `"bypassPermissions"` | See §6.5. |
 | `cwd` | target project root | Scopes tool calls to the project. |
 | `settingSources` | `["project"]` | Loads the project's `CLAUDE.md` / hooks if present. |
 | `effort` | from `[claude].effort` (default `"xhigh"`) | Highest-quality reasoning per step (Opus 4.7 recommendation). |
-| `canUseTool` | ccloop's sandbox-aware approver (see §6.5) | Auto-approves tool calls; routes Bash through `bwrap` / `sandbox-exec` when `yolo_mode: false`. |
+| `hooks.PreToolUse` | ccloop's sandbox-aware approver (see §6.5) | Pre-empts the CLI's hardcoded permission gates so the approver is the only trust boundary. |
 | `resume` / `continue` | from `state.json` if present | See §6.2. |
 
 `allowedTools` is **not** set. Users wanting tool restrictions
@@ -514,24 +514,50 @@ configure them in their `~/.claude/` settings.
 
 ### 6.5 Sandbox / permission policy
 
-`yolo_mode` is the single user-facing knob:
+`yolo_mode` is the single user-facing knob.
+
+**Why hooks, not `canUseTool`.** The Claude Agent SDK is a wrapper
+around the `claude` CLI binary; the binary owns the permission system
+and applies several hardcoded pre-checks before invoking
+`canUseTool`:
+
+- A Bash command-prefix allowlist (only common commands like `ls`,
+  `cat`, `grep` auto-pass; `bun init`, `mkdir`, `chmod`, etc. require
+  approval).
+- A shell-operator gate (any command containing `>`, `<<`, `&&`, `|`,
+  `||` requires approval).
+- A file-write permission gate (Edit / Write to any path without a
+  matching `permissions.allow` rule requires approval).
+
+In an SDK context with no UI, "requires approval" comes back as a
+tool error *without* ever invoking `canUseTool` — so a `canUseTool`
+approver could not actually intercept those calls or wrap them in a
+sandbox. **`hooks.PreToolUse`**, by contrast, runs *before* the
+binary's permission system and can return an explicit
+`permissionDecision` that overrides every pre-check. ccloop therefore
+hangs its sandbox + denylist on a `PreToolUse` hook.
 
 - **`yolo_mode: false`** (default):
-  - `permissionMode: "acceptEdits"` — file ops auto-approved by the
-    SDK with built-in CWD-scoping.
-  - `canUseTool` callback approves any tool that falls through —
-    notably non-edit Bash. Bash invocations are wrapped through
-    `bwrap` (Linux) or `sandbox-exec` (macOS) configured to allow
-    only CWD writes/reads.
-  - Hook layer applies a denylist of catastrophic patterns
-    (`rm -rf /`, `:(){:|:&};:`, `sudo`, `dd of=/dev/`, etc.). Denials
-    return as tool errors so Claude can course-correct.
+  - `permissionMode: "default"`.
+  - `hooks.PreToolUse` runs before the CLI's permission system. The
+    hook returns one of `{ permissionDecision: 'allow' | 'deny',
+    permissionDecisionReason?, updatedInput? }`.
+  - Bash invocations are denylist-checked first; on match, the hook
+    returns `deny` with the reason. The denylist covers catastrophic
+    patterns (`rm -rf /`, `:(){:|:&};:`, `sudo`, `dd of=/dev/`, etc.).
+    Denials surface as tool errors so Claude can course-correct.
+  - Bash invocations are otherwise allowed with `updatedInput.command`
+    rewritten to wrap the original command via `bwrap` (Linux) or
+    `sandbox-exec` (macOS), scoped to allow only CWD reads/writes.
+  - Edit / Write / NotebookEdit / MultiEdit are allowed unchanged —
+    the SDK's `cwd` already scopes file ops to the project root.
   - Per-Bash sandbox setup is fast (no VM), measurable in
     milliseconds.
 
 - **`yolo_mode: true`**:
-  - `permissionMode: "bypassPermissions"`.
-  - `canUseTool` returns approve unconditionally; no sandboxing.
+  - `permissionMode: "bypassPermissions"` + `allowDangerouslySkipPermissions: true`.
+  - The hook still runs but returns `allow` for every tool call with
+    no rewriting; no sandboxing.
   - ccloop logs a warning on every instance start when `yolo_mode` is
     on.
 
@@ -540,8 +566,9 @@ configure them in their `~/.claude/` settings.
 - A sandbox-blocked tool call returns to Claude as a tool error with a
   descriptive message (e.g. "command refers to path outside CWD").
   This is **not** a step failure (§9.1) — Claude course-corrects.
-- If `bwrap` is unavailable on Linux while `yolo_mode: false`, ccloop
-  refuses to start with a clear error.
+- If `bwrap` is unavailable on Linux while `yolo_mode: false`, the
+  hook denies the call with a clear reason; the agent surfaces it,
+  the user installs `bwrap` (or sets `yolo_mode = true`).
 
 ### 6.6 Environment
 
@@ -1087,11 +1114,13 @@ records for derived metrics. It never reads `events.jsonl` directly.
 
 ### 11.2 TUI architecture
 
-- Renderer: `ink`.
+- Renderer: `ink` + `ink-scroll-view` for the scrollable panes.
 - Tick: 250ms render tick. Independent of the step loop.
 - Event bus: in-memory queue. Step lifecycle code emits; TUI
-  subscribes. Events also written to `events.jsonl` by a separate
-  writer.
+  subscribes. Most events are also written to `events.jsonl` by a
+  separate writer; the bus-only `stream_chunk` event (carrying live
+  SDK turn events for the Now pane) is **not** persisted — it would
+  bloat the durable log without paying rent.
 - Polling: usage endpoint (§7.6) every 30s. Step records read on
   completion.
 - Resize: terminal resize triggers re-layout; renders minimal layout
@@ -1110,16 +1139,49 @@ records for derived metrics. It never reads `events.jsonl` directly.
 
 ### 11.4 Dashboard content (RUNNING)
 
-| Panel row | Source |
+The dashboard is a single column of bordered panes. Three panes are
+**focusable** (scrollable, keyboard-navigable); the rest are static.
+
+| Pane | Focusable? | Source |
+|---|---|---|
+| header (state · step · cost · tokens · cwd) | no | `state.json` + wall clock + rolling step-record averages |
+| **now** (live current-step stream) | yes | bus `stream_chunk` events parsed from SDK assistant / tool_use / tool_result blocks; cleared on `step_start` |
+| usage (5h / weekly utilization bars) | no | `/api/oauth/usage` cache (§7.6) |
+| **recent steps** | yes | `./.ccloop/steps/*.json`, all entries (pane scrolls) |
+| **log** (human-readable event tail) | yes | bus events formatted; 500-entry ring buffer |
+| controls hint | no | static, per-state |
+
+**Focus model.** Exactly one focusable pane has keyboard focus at any
+time. The focused pane renders with a double-line border in `cyan`;
+unfocused focusable panes render with a rounded `gray` border. Static
+panes render with a rounded default border. Initial focus is `now`.
+
+**Keyboard.** In RUNNING / PAUSED / DONE:
+
+| Key | Action |
 |---|---|
-| status / step counter / elapsed | `state.json` + wall clock |
-| done indicators (informational) | parse SPEC.md (checklist, Verification Requirements heading), `fs.existsSync("DONE.md")` |
-| current step (template, tools, last actions) | live event stream from SDK |
-| 5h / weekly bars | `/api/oauth/usage` cache (§7.6) |
-| tokens, cost, cache hit rate | rolling averages from step records |
-| recent steps | last 5 entries from `./.ccloop/steps/*.json` |
-| events tail | last N events from in-memory bus |
-| controls hint | static |
+| `Tab` / `Shift+Tab` | Cycle focus forward / backward through available panes |
+| `↑` / `↓` | Scroll focused pane by one line |
+| `PgUp` / `PgDn` | Scroll focused pane by one viewport |
+| `g` / `G` | Top / bottom of focused pane (vim-style) |
+| `Ctrl-C` | Stop the loop |
+
+ESCALATED and GUARDRAIL_TRIP keep their state-specific single-letter
+menu keys (§9.6, §10.5) and disable scroll keys.
+
+**Auto-tail.** Each focusable pane auto-scrolls to the bottom on new
+content unless the user has manually scrolled away from the bottom.
+Pressing `G` (or scrolling back to the bottom) re-engages auto-tail.
+
+**Now-pane content.** A flat sequence of `TurnEvent`s built per step:
+- `turn_start` — separator marking a new Anthropic turn
+- `assistant_text` — prose blocks emitted by the model
+- `tool_use` — tool name + truncated input summary (e.g. `▶ Bash · bun test`)
+- `tool_result` — pass/fail glyph + truncated excerpt
+- `idle` — synthetic, used during cadence sleeps between steps
+
+The Now pane is cleared at each `step_start` so it always reflects the
+*current* step's stream, not the entire run.
 
 ### 11.5 Event log schema
 
