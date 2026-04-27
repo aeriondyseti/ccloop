@@ -10,7 +10,7 @@ import { confirmDefaultYes } from "./prompt.ts";
 import { runInit } from "./init.ts";
 import { CCLOOP_DIR, CONFIG_FILENAME, SPEC_FILENAME, runtimePaths } from "../state/paths.ts";
 import {
-  initRepoEmpty, isGitRepo, isWorkingTreeClean,
+  autoCommit, initRepoEmpty, isGitRepo, isWorkingTreeClean,
 } from "../loop/git.ts";
 import { acquireLock, LockHeldError } from "../state/lock.ts";
 import { LoopDriver } from "../loop/driver.ts";
@@ -115,17 +115,12 @@ export async function runRun(argv: string[]): Promise<number> {
       return 1;
     }
   }
-  // For --continue paths, dirty trees come from a recovery scenario.
-  // §10.4 recovery commit policy is a roadmap item; for MVP we just warn.
-  if (
-    (decision.kind === "resume_after_confirm" || decision.kind === "resume_no_prompt") &&
-    !(await isWorkingTreeClean(cwd))
-  ) {
-    process.stderr.write(
-      "ccloop: --continue with dirty tree. MVP refuses; commit/stash and retry.\n",
-    );
-    return 1;
-  }
+  // §10.4 recovery commit: --continue with a dirty tree means the
+  // previous instance was killed mid-step. Auto-commit whatever's
+  // there before resuming so the loop has a clean baseline. Step
+  // number is filled in once state is loaded (see below).
+  const isResume = decision.kind === "resume_after_confirm" || decision.kind === "resume_no_prompt";
+  const needsRecoveryCommit = isResume && !(await isWorkingTreeClean(cwd));
 
   // 5. Set caching env opt-in per §6.6.
   process.env.ENABLE_PROMPT_CACHING_1H = process.env.ENABLE_PROMPT_CACHING_1H ?? "1";
@@ -148,6 +143,25 @@ export async function runRun(argv: string[]): Promise<number> {
   const bus = new EventBus<import("../loop/driver.ts").DriverEvent>();
   const driver = new LoopDriver(cwd, paths, config, bus);
   const state = await driver.loadOrInitState();
+
+  if (needsRecoveryCommit) {
+    try {
+      const r = await autoCommit(
+        cwd,
+        `chore(ccloop): recovery commit before resume of step ${state.current_step}`,
+      );
+      if (r.committed) {
+        process.stderr.write(
+          `ccloop: recovered dirty tree into commit ${r.sha.slice(0, 7)}.\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`ccloop: recovery commit failed: ${(err as Error).message}\n`);
+      if (release) await release();
+      return 1;
+    }
+  }
+
   const usageClient = token
     ? new UsageClient({ token })
     : null;

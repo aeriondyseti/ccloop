@@ -76,28 +76,26 @@ piece below is theoretically wired but empirically unproven.
    `/api/oauth/usage` response shape under load, real
    `stop_reason` distribution per step, real
    pause-then-resume timing across the 5h window boundary.
-3. **`run --continue` with a dirty tree.** Currently MVP refuses;
-   §10.4 wants a recovery-commit policy so a kill mid-step doesn't
-   strand the user. Decide and implement.
-4. **TUI dogfood pass.** Render the four non-RUNNING states
+3. **TUI dogfood pass.** Render the four non-RUNNING states
    (PAUSED, ESCALATED, GUARDRAIL_TRIP, DONE) on an 80×24 terminal,
    compare to the spec mockups, fix layout drift. Verify the
    escalation hotkeys (`c` / `r` / `e` / `q`) work in a real
    terminal, not just unit tests.
-5. **Sandbox empirical check.** Confirm `bwrap` actually denies
+4. **Sandbox empirical check.** Confirm `bwrap` actually denies
    out-of-CWD writes for the Bash tool on a current Linux setup;
    confirm the denylist patterns match what Claude Code emits in
    practice. macOS `sandbox-exec` deferred until someone tests it.
-6. **`ccloop init` polish.** Verify the scaffolded `ccloop.toml`
+5. **`ccloop init` polish.** Verify the scaffolded `ccloop.toml`
    and `SPEC.md` produce a runnable project with no manual edits
    beyond filling in the spec body.
-7. **CI + npm publish.** Add `.github/workflows/ci.yml` with a
-   `test` job (typecheck + `bun test`) gating a `publish` job:
-   `dev` → `npm publish --tag dev` (auto-versioned), `main` →
-   `npm publish --tag latest` + git tag + GitHub Release. Wire
-   `dev` as the integration branch per the project's branching
-   flow.
-8. **README usage examples that actually run.** Replace the current
+6. **npm Trusted Publisher setup.** `.github/workflows/ci.yml`
+   already implements the test → publish gating, dev/main tag
+   logic, dev-version auto-suffixing, GitHub Release creation, and
+   `dev`-branch reset. Still needed: configure the `ccloop`
+   package on npmjs.com under "Trusted Publisher" pointing at this
+   repo + `ci.yml`, then create the `dev` branch and protect
+   `main`.
+7. **README usage examples that actually run.** Replace the current
    Quickstart's hand-wavy paths with copy-pasteable commands
    verified against the post-self-run binary.
 

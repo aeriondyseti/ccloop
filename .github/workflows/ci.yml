@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+
+  publish:
+    needs: test
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # tag + release on main, force-push dev reset
+      id-token: write   # npm Trusted Publisher OIDC
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm to OIDC-capable version
+        run: npm install -g npm@latest
+      - run: bun install --frozen-lockfile
+
+      - name: Set dev version
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          BASE=${BASE%%-*}
+          NEW="${BASE}-dev.${{ github.run_number }}"
+          npm version --no-git-tag-version "$NEW"
+          echo "PUBLISH_TAG=dev" >> "$GITHUB_ENV"
+
+      - name: Set main publish tag
+        if: github.ref == 'refs/heads/main'
+        run: echo "PUBLISH_TAG=latest" >> "$GITHUB_ENV"
+
+      - name: Publish to npm
+        run: npm publish --provenance --tag "$PUBLISH_TAG" --access public
+
+      - name: Tag and release on main
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "$TAG" --generate-notes
+
+      - name: Reset dev to main
+        if: github.ref == 'refs/heads/main'
+        run: git push origin "refs/heads/main:refs/heads/dev" --force

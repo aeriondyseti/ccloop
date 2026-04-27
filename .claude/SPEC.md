@@ -1022,15 +1022,16 @@ uncommitted changes the user didn't author intentionally:
 
 - **`ccloop run` (fresh)**: tree must be clean. Otherwise refuse with
   an error pointing at `git status`.
-- **`ccloop run --continue`**: ccloop-authored changes from an
-  interrupted step (e.g. SIGKILL between Claude finishing and
-  auto-commit) are detected via `state.json`'s last-step-state being
-  `executing` or `pre-commit`. ccloop commits the dirty state with a
-  `ccloop recover step NNNN` message and proceeds.
-- **Files added by user during pause**: indistinguishable from
-  ccloop-interrupted state. MVP refuses `--continue` if dirty without
-  recoverable state in `state.json`. User commits/stashes manually.
-  See §14 KU.
+- **`ccloop run --continue`**: a dirty tree means the previous
+  instance was killed mid-step (SIGKILL between Claude finishing and
+  auto-commit, panic, OS reboot, etc.). ccloop auto-stages everything
+  and commits with subject
+  `chore(ccloop): recovery commit before resume of step NNNN`, then
+  proceeds. The user already opted into resume by passing
+  `--continue` (and confirming the matrix prompt), so attributing the
+  changes to a recovery commit is the safe default — anything the
+  user added during the pause is preserved in git history rather than
+  silently entangled with the next step's auto-commit.
 
 The greenfield-init exception (§0): if CWD was empty and `git init`
 happened in this same instance, the tree-clean requirement is
@@ -1565,9 +1566,10 @@ Items requiring empirical validation during build, not assumption.
 
 ### 14.5 Working-tree handling
 
-- **Dirty-tree on `--continue`** (§10.4). MVP refuses if dirty
-  without recoverable state. *Resolve*: collect cases; soften to
-  "warn and ask" if false-positive rate is high.
+- **Dirty-tree on `--continue`** (§10.4). MVP auto-creates a
+  recovery commit. *Resolve*: confirm in practice that this never
+  silently swallows user-intended edits; if it does, soften to
+  "warn and ask".
 
 ### 14.6 Operational
 
