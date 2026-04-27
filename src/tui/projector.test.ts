@@ -27,6 +27,53 @@ describe("project", () => {
     expect(v.controlsHint).toMatch(/ctrl-c/);
   });
 
+  test("RUNNING controls hint advertises scroll keys", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.controlsHint).toMatch(/tab focus/);
+    expect(v.controlsHint).toMatch(/scroll/);
+  });
+
+  test("nowContent / focus / heartbeat pass through", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [],
+      now: new Date(),
+      nowContent: [{ kind: "assistant_text", text: "hi", ts: "" }],
+      focus: "log",
+      heartbeat: "○",
+    });
+    expect(v.nowContent.length).toBe(1);
+    expect(v.focus).toBe("log");
+    expect(v.heartbeat).toBe("○");
+  });
+
+  test("nowContent / focus / heartbeat have sensible defaults", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.nowContent).toEqual([]);
+    expect(v.focus).toBe("now");
+    expect(v.heartbeat).toBe("●");
+  });
+
+  test("rolling stats sum across many records (recent-steps pane removed)", () => {
+    const s = freshState();
+    const many = Array.from({ length: 50 }, (_, i) =>
+      rec({ step: i + 1, cost_usd: 0.1, cache_hit_rate: 0.5,
+            usage: { ...emptyUsage(), input_tokens: 1, output_tokens: 1 } }));
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: many, events: [],
+      now: new Date(),
+    });
+    expect(v.rollingCostUsd).toBeCloseTo(5.0);
+    expect(v.rollingTokensIn).toBe(50);
+    expect(v.rollingTokensOut).toBe(50);
+  });
+
   test("rolling stats sum across records", () => {
     const s = freshState();
     const v = project({

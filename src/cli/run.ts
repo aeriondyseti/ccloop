@@ -30,6 +30,11 @@ import { writeState } from "../state/state.ts";
 import { spawnSync } from "node:child_process";
 
 const TUI_TICK_MS = 250;
+const HEARTBEAT_INTERVAL_MS = 1000;
+const LOG_CAP = 500;
+const RECENT_STEPS_CAP = 200;
+/** Window during which a second Ctrl+C is treated as "force exit". */
+const FORCE_EXIT_WINDOW_MS = 3000;
 
 export async function runRun(argv: string[]): Promise<number> {
   let flags;
@@ -189,17 +194,56 @@ export async function runRun(argv: string[]): Promise<number> {
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
 
-  // 9. TUI: render via ink, ticked by the bus + 250ms timer.
+  // 9. TUI: render via ink. Renders are dirty-driven — the tick wakes
+  // up at TUI_TICK_MS but only repaints if a buffer changed or the
+  // heartbeat needs to flip. At 4Hz with full-frame terminal redraws,
+  // unconditional rerendering visibly flickers on borderbox layouts.
   let view: TuiViewModel = { ...EMPTY_VIEW, cwd, runId: state.run_id, step: state.current_step };
-  let recentEvents: string[] = [];
+  let logBuffer: string[] = [];
+  let nowBuffer: import("../tui/types.ts").TurnEvent[] = [];
+  let heartbeat: "●" | "○" = "●";
+  let lastHeartbeatToggleMs = Date.now();
+  let viewDirty = true;
   let finalCommitSha = "";
   let stepsDirty = true;
   let cachedRecent: import("../loop/stepRecord.ts").StepRecord[] = [];
+  let interrupting = false;
+  let firstInterruptAt = 0;
+  let cadenceWait: { startedAt: string; totalMs: number } | null = null;
   bus.subscribe((e) => {
-    recentEvents = [...recentEvents, eventToLine(e)].slice(-12);
-    if (e.type === "step_end") stepsDirty = true;
+    if (e.type === "stream_chunk") {
+      nowBuffer = [...nowBuffer, e.turn];
+      viewDirty = true;
+      return;
+    }
+    if (e.type === "cadence_wait_enter") {
+      cadenceWait = { startedAt: e.started_at, totalMs: e.total_ms };
+      viewDirty = true;
+      return;
+    }
+    if (e.type === "cadence_wait_exit") {
+      cadenceWait = null;
+      viewDirty = true;
+      return;
+    }
+    if (e.type === "step_start") {
+      // New step begins — clear the now pane so it shows only the
+      // current step's stream.
+      nowBuffer = [];
+      viewDirty = true;
+    }
+    const line = eventToLine(e);
+    if (line) {
+      logBuffer = [...logBuffer, line].slice(-LOG_CAP);
+      viewDirty = true;
+    }
+    if (e.type === "step_end") {
+      stepsDirty = true;
+      viewDirty = true;
+    }
     if (e.type === "done" && "final_commit_sha" in e) {
       finalCommitSha = String(e.final_commit_sha);
+      viewDirty = true;
     }
   });
   // Closure-shared menu key handler. Set during ESCALATED /
@@ -207,19 +251,49 @@ export async function runRun(argv: string[]): Promise<number> {
   // every rerender so Ink's useInput in those screens has somewhere
   // to dispatch keystrokes.
   let menuKeyHandler: ((key: MenuKey) => void) | null = null;
-  const ink = render(React.createElement(Dashboard, { view }));
+  const onInterrupt = (): void => {
+    const now = Date.now();
+    if (interrupting && now - firstInterruptAt < FORCE_EXIT_WINDOW_MS) {
+      // Second press within the grace window — give up on graceful
+      // shutdown. Restore terminal and bail.
+      ink.unmount();
+      process.exit(130);
+    }
+    interrupting = true;
+    firstInterruptAt = now;
+    aborter.abort();
+    viewDirty = true;
+  };
+  const ink = render(React.createElement(Dashboard, { view, onInterrupt }), {
+    exitOnCtrlC: false,
+  });
   if (usageClient) void usageClient.get();
   const usagePollTimer = usageClient ? setInterval(() => {
     void usageClient.get();
+    viewDirty = true;
   }, 30_000) : null;
   const tickTimer = setInterval(async () => {
     if (stepsDirty) {
-      cachedRecent = await loadRecentSteps(paths.steps, 5);
+      cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
       stepsDirty = false;
+      viewDirty = true;
     }
-    view = buildView(state, cwd, usageClient, recentEvents, cachedRecent, finalCommitSha);
+    const now = Date.now();
+    let beat = false;
+    if (now - lastHeartbeatToggleMs >= HEARTBEAT_INTERVAL_MS) {
+      heartbeat = heartbeat === "●" ? "○" : "●";
+      lastHeartbeatToggleMs = now;
+      beat = true;
+    }
+    if (!viewDirty && !beat) return;
+    viewDirty = false;
+    view = buildView(
+      state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
+      cachedRecent, finalCommitSha,
+      undefined, interrupting, cadenceWait,
+    );
     ink.rerender(React.createElement(Dashboard, {
-      view, onMenuKey: menuKeyHandler ?? undefined,
+      view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
     }));
   }, TUI_TICK_MS);
 
@@ -243,7 +317,7 @@ export async function runRun(argv: string[]): Promise<number> {
       // Force an immediate rerender so the new handler attaches
       // without waiting for the next tick.
       ink.rerender(React.createElement(Dashboard, {
-        view, onMenuKey: menuKeyHandler,
+        view, onMenuKey: menuKeyHandler, onInterrupt,
       }));
       if (abortSignal.aborted) return finish("q");
       abortSignal.addEventListener("abort", onAbort, { once: true });
@@ -282,8 +356,12 @@ export async function runRun(argv: string[]): Promise<number> {
   } finally {
     clearInterval(tickTimer);
     if (usagePollTimer) clearInterval(usagePollTimer);
-    cachedRecent = await loadRecentSteps(paths.steps, 5);
-    view = buildView(state, cwd, usageClient, recentEvents, cachedRecent, finalCommitSha);
+    cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
+    view = buildView(
+      state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
+      cachedRecent, finalCommitSha,
+      undefined, interrupting, cadenceWait,
+    );
     ink.rerender(React.createElement(Dashboard, { view }));
     ink.unmount();
     process.off("SIGINT", onSigInt);
@@ -305,9 +383,58 @@ async function isCwdGreenfield(cwd: string): Promise<boolean> {
   return true;
 }
 
+/** Format a bus event into a one-line log entry for the log pane.
+ *  Returning empty string suppresses the entry entirely. */
 function eventToLine(e: { ts: string; type: string } & Record<string, unknown>): string {
-  const t = e.ts.replace("T", " ").replace(/\.\d+Z$/, "Z");
-  return `${t}  ${e.type}`;
+  const t = e.ts.replace("T", " ").replace(/T?\.\d+Z$/, "Z").slice(11, 19);
+  switch (e.type) {
+    case "step_start":
+      return `${t}  step ${e.step} started`;
+    case "step_end": {
+      const subtype = String(e.subtype ?? "");
+      const dur = formatDurationShort(numberOr(e.duration_ms, 0));
+      const cost = `$${numberOr(e.cost_usd, 0).toFixed(2)}`;
+      const sha = String(e.commit_sha ?? "").slice(0, 7);
+      const out = String(e.outcome ?? subtype);
+      // Use the text-style check / cross (✓ / ✗) rather than ✔ / ✘:
+      // the latter are sometimes auto-promoted to emoji presentation
+      // by the terminal (rendering as 2 columns) while string-width
+      // counts them as 1 — that mismatch shifts everything after the
+      // mark by a column.
+      const mark = out === "success" ? "✓" : out === "failure" ? "✗" : "·";
+      const subj = String(e.commit_subject ?? "").trim();
+      const subjPart = subj ? ` · ${subj}` : "";
+      return `${t}  step ${e.step} ${mark} ${dur} · ${cost}${sha ? ` · ${sha}` : ""}${subjPart}`;
+    }
+    case "step_failed":
+      return `${t}  step ${e.step} failed: ${String(e.category ?? "unknown")}`;
+    case "pause_enter":
+      return `${t}  pause: ${String(e.reason ?? "")} (${String(e.window ?? "")})`;
+    case "pause_exit":
+      return `${t}  resume: ${String(e.wake_reason ?? "")}`;
+    case "escalate":
+      return `${t}  escalate: ${String(e.reason ?? "")}`;
+    case "guardrail_trip":
+      return `${t}  guardrail: ${String(e.which ?? "")} = ${String(e.actual ?? "")}`;
+    case "usage_degraded":
+      return `${t}  usage degraded: ${String(e.reason ?? "")}`;
+    case "done":
+      return `${t}  done · ${String(e.final_commit_sha ?? "").slice(0, 7)}`;
+    default:
+      return "";
+  }
+}
+
+function numberOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+function formatDurationShort(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}m${String(r).padStart(2, "0")}s`;
 }
 
 async function handleEscalation(
@@ -386,8 +513,13 @@ function buildView(
   cwd: string,
   usage: UsageClient | null,
   events: string[],
+  nowContent: import("../tui/types.ts").TurnEvent[],
+  heartbeat: "●" | "○",
   recent: import("../loop/stepRecord.ts").StepRecord[],
   finalCommitSha: string,
+  focus: import("../tui/types.ts").FocusTarget = "now",
+  interrupting = false,
+  cadenceWait: { startedAt: string; totalMs: number } | null = null,
 ): TuiViewModel {
   const snapshot = usage?.lastSnapshot() ?? null;
   return project({
@@ -396,6 +528,11 @@ function buildView(
     usage: snapshot,
     recent,
     events,
+    nowContent,
+    focus,
+    heartbeat,
+    interrupting,
+    cadenceWait,
     now: new Date(),
     finalCommitSha,
   });

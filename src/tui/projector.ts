@@ -6,25 +6,38 @@
 import type { CcloopState } from "../state/state.ts";
 import type { UsageSnapshot } from "../usage/client.ts";
 import type { StepRecord } from "../loop/stepRecord.ts";
-import type { TuiState, TuiViewModel } from "./types.ts";
+import type { FocusTarget, TuiState, TuiViewModel, TurnEvent } from "./types.ts";
 
 export interface ProjectorInput {
   state: CcloopState;
   cwd: string;
   usage: UsageSnapshot | null;
   recent: StepRecord[];
+  /** Pre-formatted log lines, oldest → newest. Caller caps the length. */
   events: string[];
+  /** Live current-step stream. Caller resets at step boundaries. */
+  nowContent?: TurnEvent[];
+  /** Which scrollable pane currently has focus. */
+  focus?: FocusTarget;
+  /** Heartbeat tick. */
+  heartbeat?: "●" | "○";
+  /** True between first Ctrl+C and process exit. */
+  interrupting?: boolean;
+  /** Active cadence wait, if any. */
+  cadenceWait?: { startedAt: string; totalMs: number } | null;
   now: Date;
   finalCommitSha?: string;
 }
 
+const RUN_CONTROLS = "tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · ctrl-c stop";
+
 const CONTROLS: Record<TuiState, string> = {
   STARTING: "ctrl-c quit",
-  RUNNING: "ctrl-c stop",
-  PAUSED: "ctrl-c stop",
+  RUNNING: RUN_CONTROLS,
+  PAUSED: RUN_CONTROLS,
   ESCALATED: "c continue · r revert · e edit spec · q quit",
   GUARDRAIL_TRIP: "q quit · e edit ccloop.toml",
-  DONE: "q quit",
+  DONE: "tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · q quit",
 };
 
 export function project(input: ProjectorInput): TuiViewModel {
@@ -56,15 +69,12 @@ export function project(input: ProjectorInput): TuiViewModel {
     rollingTokensIn: tokensIn,
     rollingTokensOut: tokensOut,
     averageCacheHitRate: avgCache,
-    recentSteps: input.recent.map((r) => ({
-      step: r.step,
-      outcome: r.outcome,
-      cost_usd: r.cost_usd,
-      duration_ms: r.duration_ms,
-      cache_hit_rate: r.cache_hit_rate,
-      commit_subject: r.commit_subject,
-    })),
-    events: input.events,
+    nowContent: input.nowContent ?? [],
+    logContent: input.events,
+    focus: input.focus ?? "now",
+    heartbeat: input.heartbeat ?? "●",
+    interrupting: input.interrupting ?? false,
+    cadenceWait: input.cadenceWait ?? null,
     pause: input.state.pause
       ? { until: input.state.pause.until, reason: input.state.pause.reason }
       : null,
@@ -81,7 +91,9 @@ export function project(input: ProjectorInput): TuiViewModel {
     done: input.state.state === "done"
       ? { finalCommitSha: input.finalCommitSha ?? "" }
       : null,
-    controlsHint: CONTROLS[tuiState],
+    controlsHint: input.interrupting
+      ? "stopping…  press ctrl-c again to force-exit"
+      : CONTROLS[tuiState],
   };
 }
 
