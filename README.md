@@ -66,38 +66,27 @@ piece below is theoretically wired but empirically unproven.
 
 ### Remaining for 1.0
 
-1. **First real self-run.** Point ccloop at a small target spec
-   (e.g. `templates/SPEC.md`'s Markdown-to-plaintext converter) with
-   a live `CLAUDE_CODE_OAUTH_TOKEN` and confirm it drives steps,
-   commits per step, polls `/api/oauth/usage`, and exits clean on
-   `DONE.md`. Capture whatever breaks.
+1. **First real self-run** against a small target spec, confirming
+   the loop drives steps, commits per step, polls `/api/oauth/usage`,
+   and exits clean on `DONE.md`.
 2. **Close out the §14 Known Unknowns** in `.claude/SPEC.md` from
-   that run: actual prompt-cache hit rate, real
-   `/api/oauth/usage` response shape under load, real
-   `stop_reason` distribution per step, real
-   pause-then-resume timing across the 5h window boundary.
-3. **TUI dogfood pass.** Render the four non-RUNNING states
-   (PAUSED, ESCALATED, GUARDRAIL_TRIP, DONE) on an 80×24 terminal,
-   compare to the spec mockups, fix layout drift. Verify the
-   escalation hotkeys (`c` / `r` / `e` / `q`) work in a real
-   terminal, not just unit tests.
-4. **Sandbox empirical check.** Confirm `bwrap` actually denies
-   out-of-CWD writes for the Bash tool on a current Linux setup;
-   confirm the denylist patterns match what Claude Code emits in
-   practice. macOS `sandbox-exec` deferred until someone tests it.
-5. **`ccloop init` polish.** Verify the scaffolded `ccloop.toml`
-   and `SPEC.md` produce a runnable project with no manual edits
-   beyond filling in the spec body.
-6. **npm Trusted Publisher setup.** `.github/workflows/ci.yml`
-   already implements the test → publish gating, dev/main tag
-   logic, dev-version auto-suffixing, GitHub Release creation, and
-   `dev`-branch reset. Still needed: configure the `ccloop`
-   package on npmjs.com under "Trusted Publisher" pointing at this
-   repo + `ci.yml`, then create the `dev` branch and protect
-   `main`.
-7. **README usage examples that actually run.** Replace the current
-   Quickstart's hand-wavy paths with copy-pasteable commands
-   verified against the post-self-run binary.
+   the data captured during that run.
+3. **TUI dogfood pass** — render the four non-RUNNING states on
+   80×24, fix layout drift, verify escalation hotkeys in a real
+   terminal.
+4. **Sandbox empirical check** — confirm `bwrap` / denylist actually
+   block what they're supposed to under a live Claude Code session.
+5. **`ccloop init` polish** — scaffolded project must be runnable
+   with no manual edits beyond filling in the spec body.
+6. **npm Trusted Publisher setup** on npmjs.com, plus creating the
+   `dev` branch and protecting `main`. (CI workflow itself is done;
+   see `.github/workflows/ci.yml`.)
+7. **README quickstart re-verification** — copy-paste-runnable
+   against the post-self-run binary.
+
+Step-by-step instructions for executing all of these — including
+prerequisites for a fresh machine — are in
+[`RELEASE-CHECKLIST.md`](./RELEASE-CHECKLIST.md).
 
 `ROADMAP.md` parks everything deliberately scoped out of 1.0
 (planning system, container sandboxing, daemon mode, remote mode,
