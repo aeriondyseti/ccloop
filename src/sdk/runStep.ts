@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type HookCallback } from "@anthropic-ai/claude-agent-sdk";
 import type { CcloopConfig } from "../config/schema.ts";
 import { type StepResult, type StepUsage, emptyUsage } from "./types.ts";
 import { type SessionId, asSessionId } from "../branded.ts";
@@ -13,11 +13,10 @@ export interface RunStepInput {
   abortController?: AbortController;
   /** Stream observer; called for every SDK message. Errors are swallowed. */
   onMessage?: (msg: unknown) => void;
-  /** Approve every tool call. Replaced by sandbox-aware approver later. */
-  canUseTool?: (tool: string, input: Record<string, unknown>) => Promise<
-    | { behavior: "allow"; updatedInput: Record<string, unknown> }
-    | { behavior: "deny"; message: string }
-  >;
+  /** PreToolUse hook (per §6.5). Pre-empts the CLI's hardcoded
+   *  command-prefix / shell-operator / file-write pre-checks so our
+   *  denylist + sandbox wrap is the only trust boundary. */
+  preToolUseHook?: HookCallback;
 }
 
 /**
@@ -33,7 +32,8 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   const startedAt = Date.now();
   const usage: StepUsage = emptyUsage();
   let stopReason: StepResult["stop_reason"] = null;
-  let finalText = "";
+  const assistantTurns: string[] = [];
+  let resultText = "";
   let sessionId: SessionId = input.resumeSessionId ?? asSessionId("");
   let subtype: StepResult["subtype"] = "error_during_execution";
   let numTurns = 0;
@@ -62,7 +62,8 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
       if (typeof sr === "string") stopReason = sr as StepResult["stop_reason"];
       const innerUsage = inner.usage as Record<string, unknown> | undefined;
       if (innerUsage) accumulateUsage(usage, innerUsage);
-      finalText = extractText(inner.content) || finalText;
+      const turnText = extractText(inner.content);
+      if (turnText) assistantTurns.push(turnText);
     }
 
     if (m.type === "result") {
@@ -80,10 +81,16 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
         for (const e of m.errors) if (typeof e === "string") errors.push(e);
       }
       if (typeof (m as { result?: unknown }).result === "string") {
-        finalText = (m as { result: string }).result || finalText;
+        resultText = (m as { result: string }).result;
       }
     }
   }
+
+  // Prefer the canonical ResultMessage.result when it's strictly richer
+  // than the accumulated transcript; otherwise keep the full transcript
+  // so intermediate-turn explanations aren't lost. (See §6.3.)
+  const accumulated = assistantTurns.join("\n\n");
+  const finalText = resultText.length > accumulated.length ? resultText : accumulated;
 
   return {
     subtype,
@@ -104,11 +111,15 @@ function buildSdkOptions(input: RunStepInput): Record<string, unknown> {
     cwd: input.cwd,
     includePartialMessages: true,
     maxTurns: input.config.claude.max_turns_per_step,
-    permissionMode: yolo ? "bypassPermissions" : "acceptEdits",
+    permissionMode: yolo ? "bypassPermissions" : "default",
     settingSources: ["project"],
   };
   if (yolo) opts.allowDangerouslySkipPermissions = true;
-  if (input.canUseTool) opts.canUseTool = input.canUseTool;
+  if (input.preToolUseHook) {
+    opts.hooks = {
+      PreToolUse: [{ hooks: [input.preToolUseHook] }],
+    };
+  }
   if (input.abortController) opts.abortController = input.abortController;
   if (input.resumeSessionId) opts.resume = input.resumeSessionId;
   return opts;

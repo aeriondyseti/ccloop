@@ -1,0 +1,132 @@
+/**
+ * Translate raw Agent SDK messages into the `TurnEvent` shape the TUI
+ * consumes. Stateful only to pair `tool_result` blocks back to the
+ * `tool_use` that named them.
+ *
+ * Pure with respect to time — the caller stamps `ts` so tests can pin
+ * it.
+ */
+import type { TurnEvent } from "../tui/types.ts";
+import { truncateToWidth } from "../util/width.ts";
+
+export class StreamParser {
+  private toolNames = new Map<string, string>();
+
+  consume(msg: unknown, ts: string): TurnEvent[] {
+    const events: TurnEvent[] = [];
+    if (!msg || typeof msg !== "object") return events;
+    const m = msg as Record<string, unknown>;
+
+    if (m.type === "assistant") {
+      const inner = (m.message as Record<string, unknown> | undefined) ?? {};
+      const content = inner.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          const ev = blockToEvent(block, this.toolNames, ts);
+          if (ev) events.push(ev);
+        }
+      }
+    } else if (m.type === "user") {
+      const inner = (m.message as Record<string, unknown> | undefined) ?? {};
+      const content = inner.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          const ev = userBlockToEvent(block, this.toolNames, ts);
+          if (ev) events.push(ev);
+        }
+      }
+    }
+    return events;
+  }
+}
+
+function blockToEvent(
+  block: unknown,
+  toolNames: Map<string, string>,
+  ts: string,
+): TurnEvent | null {
+  if (!block || typeof block !== "object") return null;
+  const b = block as Record<string, unknown>;
+  if (b.type === "text" && typeof b.text === "string") {
+    const text = b.text.trim();
+    if (!text) return null;
+    return { kind: "assistant_text", text, ts };
+  }
+  if (b.type === "tool_use") {
+    const id = String(b.id ?? "");
+    const name = String(b.name ?? "tool");
+    if (id) toolNames.set(id, name);
+    return {
+      kind: "tool_use",
+      tool: name,
+      summary: summarizeToolInput(name, b.input),
+      ts,
+    };
+  }
+  return null;
+}
+
+function userBlockToEvent(
+  block: unknown,
+  toolNames: Map<string, string>,
+  ts: string,
+): TurnEvent | null {
+  if (!block || typeof block !== "object") return null;
+  const b = block as Record<string, unknown>;
+  if (b.type !== "tool_result") return null;
+  const id = String(b.tool_use_id ?? "");
+  const name = toolNames.get(id) ?? "tool";
+  const ok = b.is_error !== true;
+  return {
+    kind: "tool_result",
+    tool: name,
+    ok,
+    excerpt: excerptToolResult(b.content),
+    ts,
+  };
+}
+
+const EXCERPT_MAX = 200;
+const SUMMARY_MAX = 100;
+
+export function summarizeToolInput(name: string, input: unknown): string {
+  if (!input || typeof input !== "object") return "";
+  const i = input as Record<string, unknown>;
+  const oneLine = (s: string): string =>
+    truncateToWidth(s.replace(/\s+/g, " ").trim(), SUMMARY_MAX);
+  if (name === "Bash") return oneLine(String(i.command ?? ""));
+  if (name === "Edit" || name === "MultiEdit" || name === "Write" || name === "Read" || name === "NotebookEdit") {
+    return oneLine(String(i.file_path ?? i.notebook_path ?? ""));
+  }
+  if (name === "Glob") return oneLine(String(i.pattern ?? ""));
+  if (name === "Grep") return oneLine(String(i.pattern ?? ""));
+  if (name === "WebFetch" || name === "WebSearch") {
+    return oneLine(String(i.url ?? i.query ?? ""));
+  }
+  return oneLine(JSON.stringify(i));
+}
+
+export function excerptToolResult(content: unknown): string {
+  if (typeof content === "string") {
+    return truncateToWidth(firstNonEmptyLine(content), EXCERPT_MAX);
+  }
+  if (Array.isArray(content)) {
+    for (const c of content) {
+      if (c && typeof c === "object") {
+        const cc = c as Record<string, unknown>;
+        if (cc.type === "text" && typeof cc.text === "string") {
+          return truncateToWidth(firstNonEmptyLine(cc.text), EXCERPT_MAX);
+        }
+      }
+    }
+  }
+  return "";
+}
+
+function firstNonEmptyLine(s: string): string {
+  for (const line of s.split("\n")) {
+    const t = line.trim();
+    if (t) return t;
+  }
+  return "";
+}

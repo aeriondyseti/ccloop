@@ -58,6 +58,12 @@ function fakeDriver(steps: Array<StepStatus | Error>): LoopDriver {
       if (s instanceof Error) throw s;
       return s;
     },
+    /** Stub — real driver checks `existsSync(./DONE.md)`. Tests
+     *  that drive `done` via stepOnce statuses don't exercise this
+     *  path, so it's safe to always return null here. */
+    async checkDoneTransition() {
+      return null;
+    },
   } as unknown as LoopDriver;
 }
 

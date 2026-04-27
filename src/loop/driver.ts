@@ -23,7 +23,10 @@ import {
 } from "../state/state.ts";
 import { loadPromptTemplate, renderPrompt } from "../sdk/prompt.ts";
 import { runStep } from "../sdk/runStep.ts";
+import { StreamParser } from "../sdk/streamParser.ts";
 import { type StepResult } from "../sdk/types.ts";
+import { makeApprover } from "../sandbox/approver.ts";
+import type { TurnEvent } from "../tui/types.ts";
 import { autoCommit, headDiffHash, headSha } from "./git.ts";
 import { classifyStep } from "./classify.ts";
 import { deriveCommitSubject } from "./commitMessage.ts";
@@ -40,6 +43,7 @@ export type DriverEvent =
       duration_ms: number;
       cost_usd: number;
       commit_sha: Sha;
+      commit_subject: string;
       outcome: "success" | "failure" | "no-op";
     })
   | (EventBase & { type: "step_failed"; category: string; error_excerpt: string })
@@ -48,7 +52,10 @@ export type DriverEvent =
   | (EventBase & { type: "escalate"; reason: string })
   | (EventBase & { type: "pause_enter"; reason: string; until: IsoTimestamp; window: string })
   | (EventBase & { type: "pause_exit"; wake_reason: string })
-  | (EventBase & { type: "usage_degraded"; status: number | null; reason: string });
+  | (EventBase & { type: "usage_degraded"; status: number | null; reason: string })
+  | (EventBase & { type: "stream_chunk"; turn: TurnEvent })
+  | (EventBase & { type: "cadence_wait_enter"; started_at: IsoTimestamp; total_ms: number })
+  | (EventBase & { type: "cadence_wait_exit" });
 
 export type StepStatus =
   | { kind: "done"; finalCommitSha: Sha }
@@ -99,16 +106,45 @@ export class LoopDriver {
     return s;
   }
 
-  /** Emit to bus and append durably to events.jsonl. */
+  /** Emit to bus and (for durable types) append to events.jsonl.
+   *  `stream_chunk` is bus-only — writing every assistant text + tool
+   *  use to the durable log would balloon it without paying rent. */
   private async emit(event: Omit<DriverEvent, "ts">): Promise<void> {
     const enriched = { ...event, ts: isoFromDate(this.deps.now()) } as DriverEvent;
     if (this.bus) this.bus.emit(enriched);
-    await this.events.append(enriched);
+    if (
+      event.type !== "stream_chunk" &&
+      event.type !== "cadence_wait_enter" &&
+      event.type !== "cadence_wait_exit"
+    ) {
+      await this.events.append(enriched);
+    }
   }
 
   /** Check `./DONE.md` per §5.2. */
   private isDone(): boolean {
     return existsSync(join(this.cwd, DONE_FILENAME));
+  }
+
+  /** Public DONE pre-flight: returns a `done` StepStatus if `./DONE.md`
+   *  exists, applying the state transition and emitting the `done`
+   *  event as a side effect. Returns null otherwise. The orchestrator
+   *  calls this both at step pre-flight (via `stepOnce`) and again
+   *  post-step before cadence sleep, so a step that creates DONE.md
+   *  doesn't have to wait out the next cadence window before the loop
+   *  notices. */
+  async checkDoneTransition(state: CcloopState): Promise<StepStatus | null> {
+    if (!this.isDone()) return null;
+    const sha = await this.deps.headSha(this.cwd);
+    state.state = "done";
+    await writeState(this.paths.state, state);
+    await this.emit({
+      run_id: state.run_id,
+      step: state.current_step,
+      type: "done",
+      final_commit_sha: sha,
+    });
+    return { kind: "done", finalCommitSha: sha };
   }
 
   /**
@@ -118,18 +154,8 @@ export class LoopDriver {
    * state persist) before returning.
    */
   async stepOnce(state: CcloopState, abortSignal?: AbortSignal): Promise<StepStatus> {
-    if (this.isDone()) {
-      const sha = await this.deps.headSha(this.cwd);
-      state.state = "done";
-      await writeState(this.paths.state, state);
-      await this.emit({
-        run_id: state.run_id,
-        step: state.current_step,
-        type: "done",
-        final_commit_sha: sha,
-      });
-      return { kind: "done", finalCommitSha: sha };
-    }
+    const done = await this.checkDoneTransition(state);
+    if (done) return done;
 
     const gr = checkGuardrails(this.config.loop, {
       currentStep: state.current_step,
@@ -180,12 +206,32 @@ export class LoopDriver {
     const ac = abortSignal
       ? signalToController(abortSignal)
       : undefined;
+    const parser = new StreamParser();
+    const approver = makeApprover({
+      yoloMode: this.config.claude.yolo_mode,
+      cwd: this.cwd,
+    });
     const result = await this.deps.runStep({
       prompt,
       cwd: this.cwd,
       config: this.config,
       resumeSessionId: state.session_id,
       abortController: ac,
+      preToolUseHook: approver,
+      onMessage: (msg) => {
+        const ts = isoFromDate(this.deps.now());
+        for (const turn of parser.consume(msg, ts)) {
+          // Fire-and-forget — emit for stream_chunk only touches the
+          // bus, no I/O. Wrapping in a Promise keeps the type checker
+          // happy without awaiting on the SDK iterator's hot path.
+          void this.emit({
+            run_id: state.run_id,
+            step: state.current_step,
+            type: "stream_chunk",
+            turn,
+          });
+        }
+      },
     });
     const endedAt = this.deps.now();
 
@@ -289,6 +335,7 @@ export class LoopDriver {
       duration_ms: rec.duration_ms,
       cost_usd: rec.cost_usd,
       commit_sha: commitSha,
+      commit_subject: commitSubject,
       outcome,
     });
     if (failure) {

@@ -201,9 +201,41 @@ export async function runLoop(
       const backoffMs = backoffSecondsFor(config, idx) * 1000;
       await abortableSleep(backoffMs, abortSignal);
     } else {
+      // Post-step DONE check: if the step we just finished created
+      // DONE.md, transition immediately rather than waiting out the
+      // next cadence window before the next pre-flight notices.
+      const done = await driver.checkDoneTransition(state);
+      if (done && done.kind === "done") {
+        if (config.notify.notify_on_done) {
+          await fireNotification(state, opts, rateLimit, {
+            reason: "done",
+            summary: `ccloop done: run ${state.run_id} step ${state.current_step} sha ${done.finalCommitSha}`,
+          });
+        }
+        return { kind: "done", finalCommitSha: done.finalCommitSha };
+      }
       const cadenceMs = config.loop.target_cadence_seconds * 1000;
       const sleepMs = cadenceMs - stepDurationMs;
-      if (sleepMs > 0) await abortableSleep(sleepMs, abortSignal);
+      if (sleepMs > 0) {
+        bus.emit({
+          ts: nowIso(now),
+          run_id: state.run_id,
+          step: state.current_step,
+          type: "cadence_wait_enter",
+          started_at: nowIso(now),
+          total_ms: sleepMs,
+        });
+        try {
+          await abortableSleep(sleepMs, abortSignal);
+        } finally {
+          bus.emit({
+            ts: nowIso(now),
+            run_id: state.run_id,
+            step: state.current_step,
+            type: "cadence_wait_exit",
+          });
+        }
+      }
     }
   }
 

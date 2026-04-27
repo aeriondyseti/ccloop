@@ -18,7 +18,14 @@ export type EventType =
   | "notification_sent"
   | "compact_boundary"
   | "usage_degraded"
-  | "done";
+  | "done"
+  /** Bus-only: live SDK stream events for the TUI. Not written to
+   *  events.jsonl (would bloat the durable log). */
+  | "stream_chunk"
+  /** Bus-only: cadence-sleep boundaries. Lets the TUI render an
+   *  "X/Y s until next step" countdown without polling. */
+  | "cadence_wait_enter"
+  | "cadence_wait_exit";
 
 export interface EventBase {
   ts: IsoTimestamp;
