@@ -1,4 +1,4 @@
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import React from "react";
 import {
   formatBar, formatCost, formatCountdown, formatDuration,
@@ -6,15 +6,36 @@ import {
 } from "./format.ts";
 import type { TuiViewModel } from "./types.ts";
 
-export function Dashboard({ view }: { view: TuiViewModel }): React.ReactElement {
+export type MenuKey = "c" | "r" | "e" | "q";
+
+export interface DashboardProps {
+  view: TuiViewModel;
+  /** When set, ESCALATED / GUARDRAIL_TRIP screens dispatch their
+   *  hotkeys through this callback. Each TUI state filters to the
+   *  keys it actually advertises (§9.6, §10.5). */
+  onMenuKey?: (key: MenuKey) => void;
+}
+
+export function Dashboard({ view, onMenuKey }: DashboardProps): React.ReactElement {
   switch (view.state) {
     case "STARTING": return <Starting view={view} />;
     case "RUNNING":  return <Running view={view} />;
     case "PAUSED":   return <Paused view={view} />;
-    case "ESCALATED": return <Escalated view={view} />;
-    case "GUARDRAIL_TRIP": return <GuardrailTrip view={view} />;
+    case "ESCALATED": return <Escalated view={view} onMenuKey={onMenuKey} />;
+    case "GUARDRAIL_TRIP": return <GuardrailTrip view={view} onMenuKey={onMenuKey} />;
     case "DONE": return <Done view={view} />;
   }
+}
+
+function useMenuKey(
+  allowed: ReadonlyArray<MenuKey>,
+  onMenuKey: ((key: MenuKey) => void) | undefined,
+): void {
+  useInput((input) => {
+    if (!onMenuKey) return;
+    const ch = input.toLowerCase() as MenuKey;
+    if (allowed.includes(ch)) onMenuKey(ch);
+  }, { isActive: !!onMenuKey });
 }
 
 function Header({ view, title, color }: { view: TuiViewModel; title: string; color: string }) {
@@ -128,7 +149,10 @@ function Paused({ view }: { view: TuiViewModel }) {
   );
 }
 
-function Escalated({ view }: { view: TuiViewModel }) {
+function Escalated({
+  view, onMenuKey,
+}: { view: TuiViewModel; onMenuKey?: (k: MenuKey) => void }) {
+  useMenuKey(["c", "r", "e", "q"], onMenuKey);
   return (
     <Box flexDirection="column" rowGap={1}>
       <Header view={view} title="ESCALATED" color="red" />
@@ -140,7 +164,10 @@ function Escalated({ view }: { view: TuiViewModel }) {
   );
 }
 
-function GuardrailTrip({ view }: { view: TuiViewModel }) {
+function GuardrailTrip({
+  view, onMenuKey,
+}: { view: TuiViewModel; onMenuKey?: (k: MenuKey) => void }) {
+  useMenuKey(["q", "e"], onMenuKey);
   return (
     <Box flexDirection="column" rowGap={1}>
       <Header view={view} title="GUARDRAIL TRIP" color="magenta" />

@@ -18,13 +18,12 @@ import { runLoop } from "../loop/orchestrator.ts";
 import { EventBus } from "../loop/eventBus.ts";
 import { UsageClient } from "../usage/client.ts";
 import { loadOAuthToken } from "../auth/loadToken.ts";
-import { Dashboard } from "../tui/Dashboard.tsx";
+import { Dashboard, type MenuKey } from "../tui/Dashboard.tsx";
 import { project } from "../tui/projector.ts";
 import { EMPTY_VIEW } from "../tui/types.ts";
 import type { TuiViewModel } from "../tui/types.ts";
 import type { CcloopState } from "../state/state.ts";
 import { findLastGreenSha, loadRecentSteps } from "../state/stepLoader.ts";
-import { readSingleKey } from "./keys.ts";
 import { decideEscalationKey, resetForContinue } from "../loop/escalation.ts";
 import { hardReset } from "../loop/git.ts";
 import { writeState } from "../state/state.ts";
@@ -203,6 +202,11 @@ export async function runRun(argv: string[]): Promise<number> {
       finalCommitSha = String(e.final_commit_sha);
     }
   });
+  // Closure-shared menu key handler. Set during ESCALATED /
+  // GUARDRAIL_TRIP single-key prompts; tick timer threads it through
+  // every rerender so Ink's useInput in those screens has somewhere
+  // to dispatch keystrokes.
+  let menuKeyHandler: ((key: MenuKey) => void) | null = null;
   const ink = render(React.createElement(Dashboard, { view }));
   if (usageClient) void usageClient.get();
   const usagePollTimer = usageClient ? setInterval(() => {
@@ -214,8 +218,37 @@ export async function runRun(argv: string[]): Promise<number> {
       stepsDirty = false;
     }
     view = buildView(state, cwd, usageClient, recentEvents, cachedRecent, finalCommitSha);
-    ink.rerender(React.createElement(Dashboard, { view }));
+    ink.rerender(React.createElement(Dashboard, {
+      view, onMenuKey: menuKeyHandler ?? undefined,
+    }));
   }, TUI_TICK_MS);
+
+  const readMenuKey = (
+    allowed: ReadonlyArray<MenuKey>,
+    abortSignal: AbortSignal,
+  ): Promise<MenuKey> => {
+    return new Promise<MenuKey>((resolve) => {
+      let settled = false;
+      const finish = (k: MenuKey) => {
+        if (settled) return;
+        settled = true;
+        menuKeyHandler = null;
+        abortSignal.removeEventListener("abort", onAbort);
+        resolve(k);
+      };
+      const onAbort = () => finish("q");
+      menuKeyHandler = (k) => {
+        if (allowed.includes(k)) finish(k);
+      };
+      // Force an immediate rerender so the new handler attaches
+      // without waiting for the next tick.
+      ink.rerender(React.createElement(Dashboard, {
+        view, onMenuKey: menuKeyHandler,
+      }));
+      if (abortSignal.aborted) return finish("q");
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
 
   // 10. Drive the loop, handling escalation cycles.
   let exitCode = 0;
@@ -228,13 +261,17 @@ export async function runRun(argv: string[]): Promise<number> {
         notifyOptions: { pushUrl: config.notify.push_url, webhookUrl: config.notify.webhook_url },
       });
       if (outcome.kind === "done") { exitCode = 0; resolved = true; }
-      else if (outcome.kind === "guardrail_trip") { exitCode = 4; resolved = true; }
+      else if (outcome.kind === "guardrail_trip") {
+        await handleGuardrailTrip(cwd, aborter.signal, readMenuKey);
+        exitCode = 4;
+        resolved = true;
+      }
       else if (outcome.kind === "cancelled") {
         exitCode = exitSignalCode || 130;
         resolved = true;
       }
       else if (outcome.kind === "escalated") {
-        const action = await handleEscalation(state, paths, cwd, aborter.signal);
+        const action = await handleEscalation(state, paths, cwd, aborter.signal, readMenuKey);
         if (action === "quit") { exitCode = 5; resolved = true; }
         // continue / revert / edit_spec → loop again with reset state
       }
@@ -278,8 +315,12 @@ async function handleEscalation(
   paths: ReturnType<typeof runtimePaths>,
   cwd: string,
   abortSignal: AbortSignal,
+  readMenuKey: (
+    allowed: ReadonlyArray<MenuKey>,
+    abortSignal: AbortSignal,
+  ) => Promise<MenuKey>,
 ): Promise<"continue" | "quit"> {
-  const key = await readSingleKey(["c", "r", "e", "q"], abortSignal);
+  const key = await readMenuKey(["c", "r", "e", "q"], abortSignal);
   if (abortSignal.aborted) return "quit";
   const lastGreen = await findLastGreenSha(paths.steps);
   const action = decideEscalationKey(key, state, lastGreen);
@@ -312,6 +353,32 @@ async function handleEscalation(
       return "continue";
     }
   }
+}
+
+/**
+ * §10.5 — guardrail-trip terminal screen. `q` quits; `e` opens the
+ * editor on `ccloop.toml` so the user can raise the limit, then exits
+ * so they can resume with `ccloop run --continue`.
+ */
+async function handleGuardrailTrip(
+  cwd: string,
+  abortSignal: AbortSignal,
+  readMenuKey: (
+    allowed: ReadonlyArray<MenuKey>,
+    abortSignal: AbortSignal,
+  ) => Promise<MenuKey>,
+): Promise<void> {
+  const key = await readMenuKey(["q", "e"], abortSignal);
+  if (abortSignal.aborted || key === "q") return;
+  const editor = process.env.EDITOR || process.env.VISUAL || "vi";
+  const r = spawnSync(editor, [join(cwd, CONFIG_FILENAME)], { stdio: "inherit" });
+  if (r.status !== 0) {
+    process.stderr.write(`\nccloop: editor exited ${r.status}.\n`);
+    return;
+  }
+  process.stderr.write(
+    `\nccloop: ${CONFIG_FILENAME} edited. Resume with \`ccloop run --continue\`.\n`,
+  );
 }
 
 function buildView(
