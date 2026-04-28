@@ -5,6 +5,36 @@ deliberately scoped out of the initial build.
 
 ## Fast-Follow (next after MVP)
 
+- **Sandbox network-egress policy for build tools.** *(Next up.)*
+  The default sandbox path (`yolo_mode = false`) routes Bash through
+  `bwrap` / `sandbox-exec` scoped to CWD, which currently has no
+  network access. That breaks any project step that needs to fetch
+  dependencies — `go mod download`, `npm install`, `pip install`,
+  `cargo fetch`, `apt`, etc. Today the workaround is to flip
+  `yolo_mode = true`, which gives up the whole sandbox to fix one
+  axis. Design needed: (a) allow egress to a configurable allow-list
+  of hosts (proxy.golang.org, registry.npmjs.org, pypi.org, …) via
+  `bwrap --share-net` plus a host-firewall layer or an
+  outbound-proxy; (b) optionally per-tool gating (only `go`, `npm`,
+  `pip` get net), (c) decide whether this is a `[claude].sandbox.net`
+  config sub-table or a separate `[sandbox]` section. macOS
+  `sandbox-exec` has its own policy DSL — figure out parity. Until
+  this lands, target projects with build-tool deps must run with
+  `yolo_mode = true`.
+
+- **Strip dev-only code from npm tarballs.** Right now `--debug`,
+  `debug:*` subcommands, the TUI keystroke logger, and test files
+  are gated at runtime via `IS_DEV_BUILD` (see `src/build-info.ts`),
+  but the source still ships in the published package. We want a
+  stronger guarantee: these files don't exist at all in
+  `npm install ccloop@latest`. Plan: refactor static imports of
+  `src/cli/debug.ts` and the TUI debug logger into dynamic imports
+  gated on `IS_DEV_BUILD`, add an `.npmignore` that excludes test
+  files + debug-only modules within `src/`, and add a CI step that
+  runs `npm pack --dry-run --json` and asserts the file list
+  matches an allowlist. The runtime gate stays as a belt; the
+  packaging gate is the suspenders.
+
 - **Revisit progress source: SPEC checklist vs. Claude's TODO.**
   Once the MVP has been used on a couple real projects, decide whether
   to drop the mandatory SPEC.md checklist and source the dashboard's
