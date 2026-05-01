@@ -94,7 +94,7 @@ export function summarizeToolInput(name: string, input: unknown): string {
   const i = input as Record<string, unknown>;
   const oneLine = (s: string): string =>
     truncateToWidth(s.replace(/\s+/g, " ").trim(), SUMMARY_MAX);
-  if (name === "Bash") return oneLine(String(i.command ?? ""));
+  if (name === "Bash") return oneLine(unwrapSandboxedBash(String(i.command ?? "")));
   if (name === "Edit" || name === "MultiEdit" || name === "Write" || name === "Read" || name === "NotebookEdit") {
     return oneLine(String(i.file_path ?? i.notebook_path ?? ""));
   }
@@ -129,4 +129,19 @@ function firstNonEmptyLine(s: string): string {
     if (t) return t;
   }
   return "";
+}
+
+/** Strip the bwrap / sandbox-exec wrapper that the approver prepends
+ *  (§6.5) so the dashboard's "now" pane shows the user-recognisable
+ *  command, not 100 chars of `--ro-bind / / --proc /proc ...`.
+ *  Both wrappers terminate with `/bin/sh -c '<inner>'`; if we
+ *  recognise that suffix shape, return the inner command. Otherwise
+ *  return as-is — defensive against future wrapper-shape changes. */
+export function unwrapSandboxedBash(command: string): string {
+  if (!command.startsWith("bwrap ") && !command.startsWith("sandbox-exec ")) {
+    return command;
+  }
+  const m = /\/bin\/sh\s+-c\s+'((?:[^']|'\\'')*)'\s*$/.exec(command);
+  if (!m || !m[1]) return command;
+  return m[1].replace(/'\\''/g, "'");
 }

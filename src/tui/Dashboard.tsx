@@ -296,9 +296,23 @@ function Header({ view }: { view: TuiViewModel }): React.ReactElement {
         <Text color={stateColor}>step {view.step}</Text>
         {status ? <Text>  ·  {status}</Text> : null}
         <Text>  ·  elapsed {formatDuration(view.elapsedMs)}</Text>
+        {view.checklist ? (
+          <Text>
+            {"  ·  checklist "}
+            <Text color={view.checklist.done === view.checklist.total ? "green" : undefined}>
+              {view.checklist.done}/{view.checklist.total}
+            </Text>
+          </Text>
+        ) : null}
       </Box>
       <Box>
-        <Text>cost {formatCost(view.rollingCostUsd)}  ·  in {formatTokens(view.rollingTokensIn)} / out {formatTokens(view.rollingTokensOut)}  ·  cache {formatPct(view.averageCacheHitRate)}</Text>
+        <Text>
+          cost {formatCost(view.rollingCostUsd)}  ·  in {formatTokens(view.rollingTokensIn)} / out {formatTokens(view.rollingTokensOut)}  ·  cache{" "}
+        </Text>
+        <Text color={view.cacheLowStreak >= 3 ? "yellow" : undefined}>
+          {formatPct(view.averageCacheHitRate)}
+          {view.cacheLowStreak >= 3 ? ` (low ${view.cacheLowStreak}×)` : ""}
+        </Text>
       </Box>
       <Text dimColor>{view.cwd}</Text>
     </Pane>
@@ -314,7 +328,8 @@ function cadenceLabel(view: TuiViewModel): string {
   const elapsedS = Math.max(0, Math.floor(elapsedMs / 1000));
   const totalS = Math.max(1, Math.floor(view.cadenceWait.totalMs / 1000));
   const clamped = Math.min(elapsedS, totalS);
-  return `cadence ${clamped}/${totalS}s`;
+  const remaining = Math.max(0, totalS - clamped);
+  return `next step in ${remaining}s (${clamped}/${totalS})`;
 }
 
 function UsagePane({ view }: { view: TuiViewModel }): React.ReactElement {

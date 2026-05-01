@@ -25,6 +25,8 @@ export interface ProjectorInput {
   interrupting?: boolean;
   /** Active cadence wait, if any. */
   cadenceWait?: { startedAt: string; totalMs: number } | null;
+  /** Latest SPEC.md checklist count, sampled by the caller. */
+  checklist?: { done: number; total: number } | null;
   now: Date;
   finalCommitSha?: string;
 }
@@ -49,13 +51,26 @@ export function project(input: ProjectorInput): TuiViewModel {
   let tokensIn = 0;
   let tokensOut = 0;
   let cacheRateSum = 0;
+  let cacheRateSamples = 0;
   for (const r of input.recent) {
     cost += r.cost_usd;
     tokensIn += r.usage.input_tokens;
     tokensOut += r.usage.output_tokens;
-    cacheRateSum += r.cache_hit_rate;
+    // Only steps that actually called the model contribute to the
+    // average. A step_timeout / synthesized failure has empty usage
+    // and a 0 hit rate — including those would pull the displayed
+    // average toward zero on an overnight run with a few hangs even
+    // though the real cache behaviour is healthy.
+    const tokens =
+      r.usage.input_tokens +
+      r.usage.cache_read_input_tokens +
+      r.usage.cache_creation_input_tokens;
+    if (tokens > 0) {
+      cacheRateSum += r.cache_hit_rate;
+      cacheRateSamples += 1;
+    }
   }
-  const avgCache = input.recent.length > 0 ? cacheRateSum / input.recent.length : 0;
+  const avgCache = cacheRateSamples > 0 ? cacheRateSum / cacheRateSamples : 0;
 
   return {
     state: tuiState,
@@ -69,6 +84,7 @@ export function project(input: ProjectorInput): TuiViewModel {
     rollingTokensIn: tokensIn,
     rollingTokensOut: tokensOut,
     averageCacheHitRate: avgCache,
+    cacheLowStreak: input.state.cache_low_streak,
     nowContent: input.nowContent ?? [],
     logContent: input.events,
     focus: input.focus ?? "now",
@@ -94,6 +110,8 @@ export function project(input: ProjectorInput): TuiViewModel {
     controlsHint: input.interrupting
       ? "stopping…  press ctrl-c again to force-exit"
       : CONTROLS[tuiState],
+    checklist:
+      input.checklist && input.checklist.total > 0 ? input.checklist : null,
   };
 }
 

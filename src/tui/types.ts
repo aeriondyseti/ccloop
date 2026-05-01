@@ -34,6 +34,11 @@ export interface TuiViewModel {
   rollingTokensIn: number;
   rollingTokensOut: number;
   averageCacheHitRate: number;
+  /** Number of consecutive recent steps below the cache-hit-rate
+   *  threshold (per SPEC §11). Renderer can surface ≥3 as a yellow
+   *  flag — that's the same point at which the cache_warning event
+   *  fires. 0 when healthy. */
+  cacheLowStreak: number;
   /** Live stream of the current step's turns. Cleared at step boundaries. */
   nowContent: TurnEvent[];
   /** Pre-formatted human-readable log lines. Capped at 500. */
@@ -54,6 +59,11 @@ export interface TuiViewModel {
   done: { finalCommitSha: string } | null;
   /** Static line of single-key controls per current state. */
   controlsHint: string;
+  /** SPEC.md `- [ ]` / `- [x]` checklist progress. `null` when the
+   *  spec has no items (or hasn't been read yet). Surfaced in the
+   *  header so an operator can see "12/47 done" at a glance — the
+   *  template promises this and overnight runs need it most. */
+  checklist: { done: number; total: number } | null;
 }
 
 export const EMPTY_VIEW: TuiViewModel = {
@@ -68,6 +78,7 @@ export const EMPTY_VIEW: TuiViewModel = {
   rollingTokensIn: 0,
   rollingTokensOut: 0,
   averageCacheHitRate: 0,
+  cacheLowStreak: 0,
   nowContent: [],
   logContent: [],
   focus: "now",
@@ -79,4 +90,5 @@ export const EMPTY_VIEW: TuiViewModel = {
   guardrail: null,
   done: null,
   controlsHint: "ctrl-c quit",
+  checklist: null,
 };

@@ -122,6 +122,21 @@ describe("summarizeToolInput", () => {
     expect(summarizeToolInput("MysteryTool", { foo: "bar" }))
       .toContain("foo");
   });
+  test("Bash unwraps bwrap / sandbox-exec wrappers for display", () => {
+    // Regression: the sandbox approver prefixes Bash commands with
+    // bwrap / sandbox-exec so the actual user command was buried
+    // deep in the wrapped string and got truncated off the end of
+    // the 100-char dashboard summary. The unwrap restores the
+    // user-recognisable form.
+    const wrapped =
+      "bwrap --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --bind '/p' '/p' --chdir '/p' --die-with-parent -- /bin/sh -c 'bun test'";
+    expect(summarizeToolInput("Bash", { command: wrapped })).toBe("bun test");
+    const macWrapped =
+      `sandbox-exec -p '(version 1)(allow default)(deny file-write*)(allow file-write*)' /bin/sh -c 'echo hi'`;
+    expect(summarizeToolInput("Bash", { command: macWrapped })).toBe("echo hi");
+    // Already-unwrapped commands pass through unchanged.
+    expect(summarizeToolInput("Bash", { command: "ls -la" })).toBe("ls -la");
+  });
 });
 
 describe("excerptToolResult", () => {

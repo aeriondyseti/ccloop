@@ -89,6 +89,54 @@ describe("project", () => {
     expect(v.rollingTokensIn).toBe(30);
     expect(v.rollingTokensOut).toBe(10);
     expect(v.averageCacheHitRate).toBe(0.75);
+    expect(v.cacheLowStreak).toBe(0);
+  });
+
+  test("averageCacheHitRate excludes records with no token usage", () => {
+    // step_timeout / synthesized-failure records carry empty usage and
+    // a 0 cache_hit_rate. Including them would pull the displayed
+    // average toward zero on overnight runs that survived a few hangs
+    // even though real cache behaviour is healthy.
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, events: [], now: new Date(),
+      recent: [
+        rec({ cost_usd: 0.1, cache_hit_rate: 1.0,
+              usage: { ...emptyUsage(), input_tokens: 10, output_tokens: 5 } }),
+        // Synthesized failure: zero usage, zero rate — must not count.
+        rec({ cost_usd: 0, cache_hit_rate: 0, usage: emptyUsage() }),
+        rec({ cost_usd: 0.2, cache_hit_rate: 0.8,
+              usage: { ...emptyUsage(), input_tokens: 20, output_tokens: 5 } }),
+      ],
+    });
+    expect(v.averageCacheHitRate).toBeCloseTo(0.9); // (1.0 + 0.8) / 2
+  });
+
+  test("checklist is surfaced when total > 0 and suppressed otherwise", () => {
+    const s = freshState();
+    const v1 = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      checklist: { done: 7, total: 12 },
+    });
+    expect(v1.checklist).toEqual({ done: 7, total: 12 });
+    const v2 = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      checklist: { done: 0, total: 0 },
+    });
+    expect(v2.checklist).toBeNull();
+    const v3 = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v3.checklist).toBeNull();
+  });
+
+  test("cacheLowStreak is surfaced from state", () => {
+    const s = freshState();
+    s.cache_low_streak = 4;
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.cacheLowStreak).toBe(4);
   });
 
   test("escalated state surfaces reason", () => {
