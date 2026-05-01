@@ -67,7 +67,7 @@ Pinned terms used by this spec:
       known gaps baked into the design). All three are optional;
       promotion copies whichever exist alongside `SPEC.md` to the
       repo root.
-- [ ] **Acceptance + validation gate.** When the user signals accept
+- [x] **Acceptance + validation gate.** When the user signals accept
       (slash command `/accept` or via an `ask_user`-driven prompt),
       ccloop runs the existing checklist parser / `validateSpec` on
       the draft. If it fails, surface the errors in the TUI and stay

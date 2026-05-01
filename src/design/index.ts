@@ -70,3 +70,12 @@ export {
   makeDesignApprover,
   type DesignApproverOptions,
 } from "./approver.ts";
+
+// Acceptance and validation
+export {
+  acceptDraft,
+  checkDraftValidity,
+  formatValidationError,
+  generateAcceptancePrompt,
+  type AcceptanceResult,
+} from "./acceptance.ts";
