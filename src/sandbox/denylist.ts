@@ -23,6 +23,15 @@ const PATTERNS: ReadonlyArray<{ re: RegExp; reason: string }> = [
   { re: /\bchmod\s+-R\s+0+\s+\//, reason: "chmod -R 0 / refused" },
   { re: />\s*\/dev\/sd[a-z]\b/, reason: "writing to raw block device refused" },
   { re: /\bshutdown\b|\breboot\b|\bhalt\b|\bpoweroff\b/, reason: "system shutdown commands refused" },
+  // Remote-mutation guards. Network is unrestricted (build tools
+  // need it) but unambiguously destructive remote operations would
+  // let an overnight run rewrite a remote branch or publish a package
+  // before the operator wakes up. Operators who want this should
+  // either enable yolo_mode or run ccloop on a worktree without push
+  // credentials.
+  { re: /\bgit\s+push\s+(?:[^\s]+\s+)*(?:--force\b|-f\b|--force-with-lease\b)/, reason: "git force-push refused (overnight runs must not rewrite remote history)" },
+  { re: /\bgit\s+push\s+[^\s]+\s+\+/, reason: "git push <remote> +ref refused (force-push shorthand)" },
+  { re: /\b(?:npm|yarn|pnpm|bun)\s+publish\b/, reason: "package publish refused (overnight runs must not push to a registry)" },
 ];
 
 export function checkDenylist(command: string): DenyMatch | null {

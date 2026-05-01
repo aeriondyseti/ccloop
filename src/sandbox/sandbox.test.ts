@@ -37,7 +37,17 @@ describe("wrapBash", () => {
     expect(r.kind).toBe("wrap");
     if (r.kind === "wrap") {
       expect(r.command).toContain("bwrap");
-      expect(r.command).toContain("--unshare-net");
+      // Network is intentionally NOT unshared — `bun install`, `npm
+      // install`, `go mod download`, etc. need internet.
+      expect(r.command).not.toContain("--unshare-net");
+      // Whole rootfs ro-bound so user toolchains anywhere on disk
+      // (mise, ~/.bun, /opt/homebrew, etc.) resolve. CWD bind comes
+      // after so writes inside the project override the ro-bind.
+      expect(r.command).toContain("--ro-bind / /");
+      const rootIdx = r.command.indexOf("--ro-bind / /");
+      const cwdIdx = r.command.indexOf("--bind '/x' '/x'");
+      expect(rootIdx).toBeGreaterThan(-1);
+      expect(cwdIdx).toBeGreaterThan(rootIdx);
       expect(r.command).toContain("'ls'");
     }
   });

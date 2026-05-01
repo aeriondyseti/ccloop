@@ -17,7 +17,10 @@
  *     `deny` with a human-readable reason so Claude can course-correct.
  *   - Bash invocations are otherwise approved with `updatedInput.command`
  *     rewritten to wrap the original command via `bwrap` (Linux) or
- *     `sandbox-exec` (macOS), scoped to allow only CWD writes/reads.
+ *     `sandbox-exec` (macOS). The wrapper allows reads anywhere but
+ *     scopes writes to CWD and `/tmp`; network is unrestricted (build
+ *     tools need it). On other platforms (Windows, BSD, …) wrap returns
+ *     passthrough and Bash runs unsandboxed.
  *   - All other tools (including Edit / Write / NotebookEdit /
  *     MultiEdit) are approved unchanged. The SDK's `cwd` parameter
  *     already scopes file edits to the project root.
