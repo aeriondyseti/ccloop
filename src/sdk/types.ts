@@ -54,7 +54,10 @@ export function emptyUsage(): StepUsage {
 }
 
 export function cacheHitRate(u: StepUsage): number {
-  const denom = u.cache_read_input_tokens + u.input_tokens;
+  const denom =
+    u.cache_read_input_tokens +
+    u.cache_creation_input_tokens +
+    u.input_tokens;
   if (denom <= 0) return 0;
   return u.cache_read_input_tokens / denom;
 }

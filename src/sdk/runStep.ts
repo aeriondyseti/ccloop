@@ -1,4 +1,11 @@
-import { query, type HookCallback } from "@anthropic-ai/claude-agent-sdk";
+import { query as defaultQuery, type HookCallback } from "@anthropic-ai/claude-agent-sdk";
+
+type QueryImpl = typeof defaultQuery;
+
+/** Prompt sent on each `pause_turn` continuation. The SDK only needs
+ *  a non-empty user message to nudge the resumed session forward —
+ *  the real conversation context comes from `resume`. */
+const CONTINUATION_PROMPT = "continue";
 import type { CcloopConfig } from "../config/schema.ts";
 import { type StepResult, type StepUsage, emptyUsage } from "./types.ts";
 import { type SessionId, asSessionId } from "../branded.ts";
@@ -17,6 +24,8 @@ export interface RunStepInput {
    *  command-prefix / shell-operator / file-write pre-checks so our
    *  denylist + sandbox wrap is the only trust boundary. */
   preToolUseHook?: HookCallback;
+  /** Test seam — defaults to the SDK's `query`. */
+  queryImpl?: QueryImpl;
 }
 
 /**
@@ -30,60 +39,84 @@ export interface RunStepInput {
  */
 export async function runStep(input: RunStepInput): Promise<StepResult> {
   const startedAt = Date.now();
+  const queryImpl: QueryImpl = input.queryImpl ?? defaultQuery;
+  const maxContinuations = Math.max(0, input.config.claude.max_continuations_per_step);
+
+  // Aggregated across all SDK calls within this ccloop step.
   const usage: StepUsage = emptyUsage();
-  let stopReason: StepResult["stop_reason"] = null;
   const assistantTurns: string[] = [];
+  const errors: string[] = [];
+  let stopReason: StepResult["stop_reason"] = null;
   let resultText = "";
   let sessionId: SessionId = input.resumeSessionId ?? asSessionId("");
   let subtype: StepResult["subtype"] = "error_during_execution";
   let numTurns = 0;
   let totalCost = 0;
-  const errors: string[] = [];
 
-  const sdkOptions = buildSdkOptions(input);
+  let prompt = input.prompt;
+  let resume = input.resumeSessionId;
+  let continuations = 0;
 
-  const q = query({ prompt: input.prompt, options: sdkOptions });
+  // Outer loop = one SDK `query` call. We keep going while the SDK
+  // returns `pause_turn` (it wants to continue past its own maxTurns
+  // budget) and we have continuation headroom. Without this, every
+  // pause_turn produced a separate ccloop step with its own commit
+  // and cadence sleep, fragmenting Claude's work.
+  while (true) {
+    const sdkOptions = buildSdkOptions(input, resume);
+    const q = queryImpl({ prompt, options: sdkOptions });
 
-  for await (const msg of q) {
-    try {
-      input.onMessage?.(msg);
-    } catch {
-      // Observers must not break the step.
-    }
+    let lastResultUsage: Record<string, unknown> | undefined;
+    for await (const msg of q) {
+      try {
+        input.onMessage?.(msg);
+      } catch {
+        // Observers must not break the step.
+      }
 
-    const m = msg as Record<string, unknown>;
-    if (typeof m.session_id === "string" && m.session_id.length > 0) {
-      sessionId = asSessionId(m.session_id);
-    }
+      const m = msg as Record<string, unknown>;
+      if (typeof m.session_id === "string" && m.session_id.length > 0) {
+        sessionId = asSessionId(m.session_id);
+      }
 
-    if (m.type === "assistant") {
-      const inner = (m.message as Record<string, unknown> | undefined) ?? {};
-      const sr = inner.stop_reason;
-      if (typeof sr === "string") stopReason = sr as StepResult["stop_reason"];
-      const innerUsage = inner.usage as Record<string, unknown> | undefined;
-      if (innerUsage) accumulateUsage(usage, innerUsage);
-      const turnText = extractText(inner.content);
-      if (turnText) assistantTurns.push(turnText);
-    }
+      if (m.type === "assistant") {
+        const inner = (m.message as Record<string, unknown> | undefined) ?? {};
+        const sr = inner.stop_reason;
+        if (typeof sr === "string") stopReason = sr as StepResult["stop_reason"];
+        const innerUsage = inner.usage as Record<string, unknown> | undefined;
+        if (innerUsage) accumulateUsage(usage, innerUsage);
+        const turnText = extractText(inner.content);
+        if (turnText) assistantTurns.push(turnText);
+      }
 
-    if (m.type === "result") {
-      subtype = (m.subtype as StepResult["subtype"]) ?? subtype;
-      numTurns = numberOr(m.num_turns, numTurns);
-      totalCost = numberOr(m.total_cost_usd, totalCost);
-      const u = m.usage as Record<string, unknown> | undefined;
-      if (u) {
-        // Prefer the result-level usage when assistant-level didn't accumulate.
-        if (usage.input_tokens === 0 && usage.output_tokens === 0) {
-          accumulateUsage(usage, u);
+      if (m.type === "result") {
+        subtype = (m.subtype as StepResult["subtype"]) ?? subtype;
+        numTurns += numberOr(m.num_turns, 0);
+        totalCost += numberOr(m.total_cost_usd, 0);
+        lastResultUsage = m.usage as Record<string, unknown> | undefined;
+        if (Array.isArray(m.errors)) {
+          for (const e of m.errors) if (typeof e === "string") errors.push(e);
+        }
+        if (typeof (m as { result?: unknown }).result === "string") {
+          resultText = (m as { result: string }).result;
         }
       }
-      if (Array.isArray(m.errors)) {
-        for (const e of m.errors) if (typeof e === "string") errors.push(e);
-      }
-      if (typeof (m as { result?: unknown }).result === "string") {
-        resultText = (m as { result: string }).result;
-      }
     }
+
+    // Result-level usage as fallback if no assistant message contributed.
+    if (lastResultUsage && usage.input_tokens === 0 && usage.output_tokens === 0) {
+      accumulateUsage(usage, lastResultUsage);
+    }
+
+    if (stopReason !== "pause_turn" || continuations >= maxContinuations) {
+      break;
+    }
+    // External cancellation (SIGINT / SIGTERM) — don't kick off
+    // another SDK call just to have it tear down on first message.
+    if (input.abortController?.signal.aborted) break;
+    continuations += 1;
+    prompt = CONTINUATION_PROMPT;
+    resume = sessionId; // resume the just-paused session.
   }
 
   // Prefer the canonical ResultMessage.result when it's strictly richer
@@ -105,7 +138,25 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   };
 }
 
-function buildSdkOptions(input: RunStepInput): Record<string, unknown> {
+/** Map ccloop's string `effort` knob to the SDK's numeric
+ *  `maxThinkingTokens` budget. Numbers calibrated to the Claude Code
+ *  CLI conventions for low/medium/high/xhigh; an unrecognized value
+ *  leaves `maxThinkingTokens` unset so the SDK uses its own default. */
+const EFFORT_TO_THINKING_TOKENS: Record<string, number> = {
+  low: 4000,
+  medium: 12000,
+  high: 24000,
+  xhigh: 64000,
+};
+
+export function effortToThinkingTokens(effort: string): number | undefined {
+  return EFFORT_TO_THINKING_TOKENS[effort.toLowerCase()];
+}
+
+function buildSdkOptions(
+  input: RunStepInput,
+  resume: SessionId | null,
+): Record<string, unknown> {
   const yolo = input.config.claude.yolo_mode;
   const opts: Record<string, unknown> = {
     cwd: input.cwd,
@@ -114,6 +165,10 @@ function buildSdkOptions(input: RunStepInput): Record<string, unknown> {
     permissionMode: yolo ? "bypassPermissions" : "default",
     settingSources: ["project"],
   };
+  const thinking = effortToThinkingTokens(input.config.claude.effort);
+  if (thinking !== undefined) opts.maxThinkingTokens = thinking;
+  if (input.config.claude.model) opts.model = input.config.claude.model;
+  if (input.config.claude.fallback_model) opts.fallbackModel = input.config.claude.fallback_model;
   if (yolo) opts.allowDangerouslySkipPermissions = true;
   if (input.preToolUseHook) {
     opts.hooks = {
@@ -121,7 +176,7 @@ function buildSdkOptions(input: RunStepInput): Record<string, unknown> {
     };
   }
   if (input.abortController) opts.abortController = input.abortController;
-  if (input.resumeSessionId) opts.resume = input.resumeSessionId;
+  if (resume) opts.resume = resume;
   return opts;
 }
 
