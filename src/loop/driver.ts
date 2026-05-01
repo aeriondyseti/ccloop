@@ -291,6 +291,7 @@ export class LoopDriver {
         resumeSessionId: state.session_id,
         abortController: ac,
         preToolUseHook: approver,
+        step: state.current_step,
         onMessage: (msg) => {
           const ts = isoFromDate(this.deps.now());
           for (const turn of parser.consume(msg, ts)) {
@@ -404,6 +405,16 @@ export class LoopDriver {
     state.session_id = result.session_id || state.session_id;
     state.steps_since_session_reset += 1;
     state.wall_clock_ms += endedAt.getTime() - startedAt.getTime();
+
+    // Self-heal context overflow: drop the resumed session so the next
+    // step starts fresh. The prompt template tells the model to reload
+    // SPEC.md and progress.md from disk on a fresh session, so we lose
+    // a turn but unwedge the run. Without this the same poisoned
+    // session would be replayed every step until escalation.
+    if (failure?.category === "context_overflow") {
+      state.session_id = null;
+      state.steps_since_session_reset = 0;
+    }
 
     const cap = this.config.claude.max_steps_per_session;
     if (cap > 0 && state.steps_since_session_reset >= cap) {
@@ -582,6 +593,7 @@ function synthesizeTimeoutResult(
     session_id: resumeSessionId ?? asSessionId(""),
     final_text: "",
     errors: [`step timed out after ${timeoutMs}ms`],
+    is_error: true,
   };
 }
 

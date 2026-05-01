@@ -379,7 +379,7 @@ describe("runLoop", () => {
         total_cost_usd: 0, duration_ms: 0, usage: {
           input_tokens: 0, output_tokens: 0,
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
-        }, session_id: asSessionId(""), final_text: "", errors: [],
+        }, session_id: asSessionId(""), final_text: "", errors: [], is_error: false,
       } },
     ]);
     const ac = new AbortController();

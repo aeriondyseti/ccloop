@@ -22,6 +22,7 @@ function mkResult(p: Partial<StepResult> = {}): StepResult {
     session_id: asSessionId("sess-1"),
     final_text: "Did the thing",
     errors: [],
+    is_error: false,
     ...p,
   };
 }
@@ -422,6 +423,27 @@ describe("LoopDriver.stepOnce", () => {
     });
     await driver2.stepOnce(state);
     expect(state.cache_low_streak).toBe(0);
+  });
+
+  test("context_overflow rotates the session", async () => {
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({
+        subtype: "success", is_error: true,
+        final_text: "Prompt is too long",
+        session_id: asSessionId("poisoned"),
+      }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: false, sha: asSha(""), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    state.session_id = asSessionId("poisoned");
+    state.steps_since_session_reset = 7;
+    await driver.stepOnce(state);
+    expect(state.session_id).toBeNull();
+    expect(state.steps_since_session_reset).toBe(0);
+    expect(state.last_failure?.category).toBe("context_overflow");
   });
 
   test("max_steps_per_session resets session_id after the cap", async () => {

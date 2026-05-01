@@ -38,8 +38,9 @@ function cmdInfo(): number {
     `entrypoint:    ${import.meta.url}`,
     `cwd:           ${process.cwd()}`,
     `bun:           ${process.versions.bun ?? "(not bun)"}`,
-    `CCLOOP_DEBUG:  ${process.env.CCLOOP_DEBUG ?? "(unset)"}`,
-    `TUI_DEBUG:     ${process.env.CCLOOP_TUI_DEBUG ?? "(unset)"}`,
+    `CCLOOP_DEBUG:     ${process.env.CCLOOP_DEBUG ?? "(unset)"}`,
+    `TUI_DEBUG:        ${process.env.CCLOOP_TUI_DEBUG ?? "(unset)"}`,
+    `SDK_DEBUG:        ${process.env.CCLOOP_SDK_DEBUG ?? "(unset)"}`,
   ];
   process.stdout.write(lines.join("\n") + "\n");
   return 0;

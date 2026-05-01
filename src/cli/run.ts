@@ -34,7 +34,7 @@ import { hardReset } from "../loop/git.ts";
 import { writeState } from "../state/state.ts";
 import { spawnSync } from "node:child_process";
 
-const TUI_TICK_MS = 250;
+const TUI_TICK_MS = 100;
 const HEARTBEAT_INTERVAL_MS = 1000;
 const LOG_CAP = 500;
 const RECENT_STEPS_CAP = 200;
@@ -377,15 +377,65 @@ export async function runRun(argv: string[]): Promise<number> {
   const ink = stdoutIsTty
     ? render(React.createElement(Dashboard, { view, onInterrupt }), {
         exitOnCtrlC: false,
+        // Ink 6 flicker mitigations:
+        //  - incrementalRendering: only emit ANSI for changed lines
+        //    instead of clear+rewrite of the whole frame region. This
+        //    is the primary fix for the flicker we saw on non-change
+        //    ticks; combined with the synchronized-output protocol
+        //    (DEC mode 2026, automatic in supporting terminals) the
+        //    frame swap becomes atomic.
+        //  - concurrent: opt into React 19's concurrent rendering;
+        //    enables future use of useDeferredValue / useTransition
+        //    for streaming work. Has no immediate behavioral effect
+        //    here but makes the renderer interruptible.
+        //  - maxFps: defaults to 30 already; explicit so the cap is
+        //    visible at the call site. Our tick is 10Hz plus a
+        //    skip-if-unchanged guard, well under the cap.
+        incrementalRendering: true,
+        concurrent: true,
+        maxFps: 30,
       })
     : null;
-  const renderNow = (): void => {
+  // Ink writes the full frame on every rerender() call regardless of
+  // whether the output bytes actually differ — each write is a
+  // clear+rewrite of the frame region, which is what shows up as
+  // flicker. The signature collapses idle ticks (only Date.now()
+  // changed) to zero paints. Quantize anything time-derived to its
+  // visible granularity (1s for heartbeat / countdown / elapsed) so
+  // sub-second ticks don't bust the cache.
+  let lastSig = "";
+  const renderNow = (force = false): void => {
     if (!ink) return;
     view = buildView(
       state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
       cachedRecent, finalCommitSha,
       undefined, interrupting, cadenceWait, cachedChecklist,
     );
+    if (!force) {
+      const cadenceS = view.cadenceWait
+        ? Math.floor((Date.now() - Date.parse(view.cadenceWait.startedAt)) / 1000)
+        : -1;
+      const sig = [
+        view.state, view.step, view.heartbeat,
+        view.nowContent.length, view.logContent.length,
+        Math.floor(view.elapsedMs / 1000),
+        cadenceS,
+        view.usage?.five_hour.utilization ?? "",
+        view.usage?.seven_day.utilization ?? "",
+        view.checklist ? `${view.checklist.done}/${view.checklist.total}` : "",
+        view.rollingCostUsd.toFixed(4),
+        view.rollingTokensIn, view.rollingTokensOut,
+        view.averageCacheHitRate.toFixed(3), view.cacheLowStreak,
+        view.focus, view.interrupting,
+        view.pause?.reason ?? "", view.pause?.until ?? "",
+        view.escalation?.reason ?? "",
+        view.guardrail?.which ?? "", view.guardrail?.actual ?? "",
+        view.done?.finalCommitSha ?? "",
+        menuKeyHandler ? 1 : 0,
+      ].join("|");
+      if (sig === lastSig) return;
+      lastSig = sig;
+    }
     ink.rerender(React.createElement(Dashboard, {
       view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
     }));
@@ -439,7 +489,7 @@ export async function runRun(argv: string[]): Promise<number> {
       // responsive. State has already mutated upstream — renderNow
       // reads `state` fresh, so the correct screen + handler land
       // in a single rerender.
-      renderNow();
+      renderNow(true);
       if (abortSignal.aborted) return finish("q");
       abortSignal.addEventListener("abort", onAbort, { once: true });
     });
@@ -495,7 +545,7 @@ export async function runRun(argv: string[]): Promise<number> {
     if (ink) {
       cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
       menuKeyHandler = null; // suppress key wiring on the final paint
-      renderNow();
+      renderNow(true);
       ink.unmount();
     }
     leaveAltScreen();

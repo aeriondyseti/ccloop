@@ -20,12 +20,40 @@ export type FailureCategory =
   | "refusal"
   | "max_budget"
   | "sdk_init"
+  | "context_overflow"
   | "commit"
   | "gate"
   | "step_timeout"
   | "loop_detected";
 
+/** Matches the SDK's synthetic "Prompt is too long" assistant message,
+ *  and any close paraphrase. Tested against `final_text` rather than the
+ *  errors array because the SDK puts this in the result payload directly. */
+const CONTEXT_OVERFLOW_RE = /prompt is too long|context.*(too long|exceed|overflow)|input is too long/i;
+
 export function classifyStep(r: StepResult): StepClassification {
+  // Errored results must be classified as failures even when the SDK
+  // tags subtype: "success". The clearest case is "Prompt is too long":
+  // a synthetic assistant message with subtype: "success", is_error:
+  // true, no API call made, no tokens billed. Falling through to
+  // success here is what wedged ccloop into resuming the same poisoned
+  // session every step (see step-0012 dump, 2026-05-01).
+  if (r.is_error) {
+    if (CONTEXT_OVERFLOW_RE.test(r.final_text) || CONTEXT_OVERFLOW_RE.test(r.errors.join(" "))) {
+      return {
+        outcome: "failure",
+        category: "context_overflow",
+        excerpt: capExcerpt(r.final_text || "context overflow"),
+      };
+    }
+    // Non-context errors that snuck through subtype: success — fall
+    // back to the generic SDK category so the failure is recorded.
+    return {
+      outcome: "failure",
+      category: "sdk",
+      excerpt: capExcerpt(r.final_text || r.errors.join("\n") || "errored result"),
+    };
+  }
   switch (r.subtype) {
     case "success":
       if (r.stop_reason === "refusal") {

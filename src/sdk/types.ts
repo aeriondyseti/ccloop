@@ -42,6 +42,12 @@ export interface StepResult {
   final_text: string;
   /** Concatenated error messages on the failure path. */
   errors: string[];
+  /** True when the SDK's terminal `result` message had `is_error: true`.
+   *  The SDK can return `subtype: "success"` with `is_error: true` for
+   *  cases like "Prompt is too long" — a synthetic assistant message
+   *  the SDK fabricates when the API rejects the request at init time.
+   *  classifyStep uses this to detect failures the subtype alone hides. */
+  is_error: boolean;
 }
 
 export function emptyUsage(): StepUsage {

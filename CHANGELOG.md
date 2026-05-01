@@ -5,6 +5,96 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Added
+- **SDK debug dump** (`CCLOOP_SDK_DEBUG=1`, auto-set by `--debug`).
+  When enabled, `runStep` writes per-step artifacts under
+  `.ccloop/sdk-debug/step-<NNNN>/`: `input-<attempt>.json` (rendered
+  prompt, `resume` session id, the full SDK `Options` object —
+  functions and `AbortController` references stringified for clean
+  JSON), `stream-<attempt>.jsonl` (one line per SDK message:
+  assistant, tool_use, tool_result, partial, system, result), and
+  `result.json` (the aggregated `StepResult`). Continuation chains
+  produce additional `input-N.json` / `stream-N.jsonl` pairs.
+  A `.gitignore` (`*\n`) is created in the dump root the first time
+  it's used so dumps never get committed accidentally. Fully
+  best-effort — file errors don't break the step. Primary use: the
+  "prompt is too long" hunt that revealed the resumed-session
+  context-overflow path. Useful one-liners: `wc -l
+  .ccloop/sdk-debug/step-<N>/stream-0.jsonl` (turn count), `jq -c
+  'select(.type=="assistant") | .message.usage' stream-0.jsonl`
+  (per-turn token growth), `grep -l prompt_too_long
+  .ccloop/sdk-debug/step-*/result.json` (every step that hit the
+  limit). New `step?: number` field on `RunStepInput` labels the
+  dump dir; `LoopDriver.stepOnce` passes `state.current_step`.
+  `debug:info` reports the new env var alongside `CCLOOP_DEBUG` and
+  `CCLOOP_TUI_DEBUG`.
+- **Auto-rotate the SDK session on context overflow.** The Anthropic
+  Agent SDK responds to a context-window-too-large request with a
+  *synthetic* assistant message (`subtype: "success"`, `is_error:
+  true`, `model: "<synthetic>"`, `result: "Prompt is too long"`,
+  `duration_api_ms: 0`) — the request never hit the API. Without
+  detection, ccloop classified this as a successful step (no commit
+  because `final_text` was the error string), preserved
+  `state.session_id`, and re-resumed the same poisoned session every
+  step until escalation. `StepResult` now carries `is_error: boolean`
+  pulled from the SDK's terminal `result` message; `classifyStep`
+  routes `is_error` results matching `/prompt is too long|context
+  .*(too long|exceed|overflow)|input is too long/i` to a new
+  `context_overflow` failure category and other `is_error` cases to
+  generic `sdk`. `LoopDriver.stepOnce` clears `state.session_id` and
+  resets `steps_since_session_reset` on `context_overflow` so the
+  next step starts a fresh session — the prompt template already
+  tells the model to reload `SPEC.md` and `.ccloop/progress.md` from
+  disk on a fresh session, so the run self-heals at a cost of one
+  extra turn instead of escalating. Discovered via the new SDK
+  debug dump (see below) on a real step-12 run.
+
+### Changed
+- **Ink 5 → 6 and React 18 → 19**, plus matching `@types/react` bump.
+  The driver was a long-running TUI flicker on log/now updates that
+  resisted every Ink-5-level mitigation: `ink-scroll-view` was not
+  the cause (swapping to a plain Box + tail-slice didn't help);
+  raising the tick rate from 250ms to 1000ms didn't reduce flicker
+  proportionally; even ticks where rendered output bytes were
+  identical produced visible repaints. Root cause: Ink 5 writes the
+  full frame on every `rerender()` regardless of diff (clear region
+  + rewrite), and there was no protocol-level synchronization with
+  the terminal. Ink 6 ships the actual fix: synchronized output
+  (DEC mode 2026, automatic in supporting terminals — Kitty,
+  WezTerm, Ghostty, recent Konsole / iTerm2 — buffers writes
+  between begin/end markers so the frame swap is atomic),
+  `incrementalRendering` (only emits ANSI for changed lines),
+  `maxFps` (built-in throttle, default 30 — supersedes our manual
+  cadence), and opt-in React 19 concurrent rendering. All three are
+  enabled at the `render()` call in `cli/run.ts`. Also fixes the
+  character-width handling issues we'd been seeing. The
+  skip-if-unchanged guard around `ink.rerender()` is kept as
+  belt-and-suspenders since it still avoids React reconciliation on
+  no-op ticks. React 19 typing change (`useRef<T>(null)` returning
+  `RefObject<T | null>`) propagated through `useScrollKeys` /
+  `useAutoTail` ref types — only behavioral surface beyond the new
+  Ink options. Default `flexShrink={0}` added to `Pane` (with
+  `NowPane` keeping `flexShrink={1}`) so a tall streaming pane no
+  longer pushes sibling panes off-screen as content grows.
+  Resolves the long-standing TUI flicker (was tracked in
+  `TECH-DEBT.md`, now moved to that file's "Resolved" section).
+
+### Refactor (simplify pass)
+- Replaced `unknown` / `Record<string, unknown>` casts in the SDK
+  iterator hot path with the SDK's actual exported types (`SDKMessage`,
+  `SDKAssistantMessage`, `SDKResultMessage`, `Options`,
+  `NonNullableUsage`). `runStep`'s message loop now narrows on
+  `msg.type` instead of cast-and-pray; `accumulateUsage` takes
+  `NonNullableUsage` directly and the previous defensive `numberOr`
+  helper was removed (the typed fields are already numbers).
+  `extractText` typed against the SDK's content-block discriminated
+  union. `buildSdkOptions` returns `Options`. Same cleanup in
+  `debugDump.ts` (`SdkDebugSink.message: SDKMessage`,
+  `finish: StepResult`, attempt payload's `options: Options`).
+  No behavior change; future SDK shape drifts now surface as
+  typecheck errors at compile time rather than silent wrong access
+  at runtime.
+
+### Added
 - **`escalation_resolved` event** captures the operator's choice at
   the escalation menu (`continue` / `revert` / `edit_spec` /
   `quit`). Previously the events log showed `escalate` then later
