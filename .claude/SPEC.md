@@ -197,7 +197,9 @@ persisted to `state.json` so subsequent instances can `resume`.
 `ENABLE_PROMPT_CACHING_1H=1`, which ccloop sets).
 
 **Cache hit rate** — `cache_read_input_tokens / (cache_read_input_tokens
-+ input_tokens)` per step, summed across all turns within the step.
++ cache_creation_input_tokens + input_tokens)` per step, summed across
+all turns within the step. Cache creation counts as a miss: those tokens
+were processed fresh and written to the cache for later reads.
 
 **Usage window** — Anthropic's rolling rate-limit windows (5h and
 weekly). Distinct from cache window.
@@ -374,6 +376,13 @@ to §9 with the step name as the failure category.
 
 **Post-flight**:
 
+7a. Optional gate (`loop.gate_command`, default empty): if configured
+    and the step is otherwise a success, run the command via `sh -c`
+    in the project group, bounded by `loop.gate_timeout_seconds`
+    (default 300). Non-zero exit or timeout ⇒ record the step as a
+    `gate` failure (§9.1) with the captured stdout/stderr tail as the
+    excerpt; skip the auto-commit; route through §9.2. Zero exit ⇒
+    proceed to step 8.
 8. Auto-commit: `git add -A && git commit -m "<auto>"` with a message
    derived from the final assistant text (sanitized; capped). On
    unchanged tree, skip and record `no-op` in the step record.
@@ -544,11 +553,31 @@ hangs its sandbox + denylist on a `PreToolUse` hook.
     permissionDecisionReason?, updatedInput? }`.
   - Bash invocations are denylist-checked first; on match, the hook
     returns `deny` with the reason. The denylist covers catastrophic
-    patterns (`rm -rf /`, `:(){:|:&};:`, `sudo`, `dd of=/dev/`, etc.).
-    Denials surface as tool errors so Claude can course-correct.
+    local patterns (`rm -rf /`, `:(){:|:&};:`, `sudo`, `dd of=/dev/`,
+    etc.) and unambiguously destructive remote-mutation patterns
+    (`git push --force` / `-f` / `--force-with-lease`, `git push
+    <remote> +ref` shorthand, and `npm`/`yarn`/`pnpm`/`bun publish`).
+    Network is otherwise unrestricted, so the denylist is the only
+    guard against an overnight run rewriting a remote branch or
+    publishing a package while the operator is away. Denials surface
+    as tool errors so Claude can course-correct.
   - Bash invocations are otherwise allowed with `updatedInput.command`
     rewritten to wrap the original command via `bwrap` (Linux) or
-    `sandbox-exec` (macOS), scoped to allow only CWD reads/writes.
+    `sandbox-exec` (macOS). Both platforms apply the same shape:
+    *reads are unrestricted across the host filesystem; writes are
+    scoped to CWD and `/tmp`.* On Linux, bwrap ro-binds `/` and then
+    layers a writable tmpfs on `/tmp` and a RW bind on CWD on top.
+    On macOS, sandbox-exec uses `(allow default) (deny file-write*)`
+    plus a write-allowlist for CWD and `/tmp`. This shape lets
+    user-installed toolchains anywhere on disk (mise, asdf, nvm,
+    `~/.bun`, `~/.cargo`, Homebrew, `/opt/...`) resolve inside the
+    sandbox without enumeration. Network access is **not** restricted
+    — package installers (`bun install`, `npm install`, `go mod
+    download`, `pip install`, etc.) need internet; the boundary is
+    filesystem scope, not exfiltration. Note: tools that write caches
+    under `$HOME` (e.g. `~/.npm`, `~/.bun/install/cache`) will see
+    EROFS and should be pointed at a writable location via
+    tool-specific env vars, or run under `yolo_mode = true`.
   - Edit / Write / NotebookEdit / MultiEdit are allowed unchanged —
     the SDK's `cwd` already scopes file ops to the project root.
   - Per-Bash sandbox setup is fast (no VM), measurable in
@@ -718,8 +747,15 @@ Persisted to `./.ccloop/steps/NNNN.json`.
 
 ```
 hit_rate = cache_read_input_tokens
-         / (cache_read_input_tokens + input_tokens)
+         / (cache_read_input_tokens
+            + cache_creation_input_tokens
+            + input_tokens)
 ```
+
+Cache creation is treated as a miss: those tokens were billed as fresh
+input and written to the cache for *future* reads, not served from it.
+Excluding them inflates the rate to ~100% any time the system prompt
+is cached and the new user turn is small.
 
 Surfaced on the dashboard per step and as a rolling average for the
 run. ccloop logs a warning when hit rate drops below 50% three steps
@@ -912,6 +948,8 @@ Step number does not advance during pause.
 | `structured_output` | `subtype: "error_max_structured_output_retries"` |
 | `refusal` | `subtype: "success"` + `stop_reason: "refusal"` |
 | `commit` | `git commit` errored after work was done |
+| `gate` | `loop.gate_command` (if configured) exited non-zero or timed out |
+| `step_timeout` | step exceeded `claude.step_timeout_seconds` watchdog |
 | `loop_detected` | §9.4 heuristic |
 
 What is **not** a failure:
@@ -995,6 +1033,13 @@ If killed while ESCALATED, `state.json` marks the run as escalated;
   ntfy.sh, Pushover, etc.
 - **Webhook**: HTTP POST to `webhook_url`. Body is a JSON envelope
   (run id, step number, reason, trail, dashboard pointer).
+- **Heartbeat**: HTTP POST to `heartbeat_url` (optional). Body is a
+  small JSON envelope (run id, step, outcome, state, ts). Fired
+  after every step (any outcome, including SDK throws) and on done.
+  Designed for healthchecks.io-style endpoints so an off-device
+  monitor can alert when ccloop goes silent overnight. Best-effort
+  with a 10s timeout per ping; not rate-limited locally — the
+  monitoring endpoint enforces its own cadence policy.
 
 Either or both can be configured; if neither, ccloop logs the
 escalation to `events.jsonl` and proceeds to the TUI screen without
@@ -1201,21 +1246,21 @@ MVP event types:
 
 | Type | When | Extra |
 |---|---|---|
-| `instance_start` | Boot | `git_sha`, `cwd`, `ccloop_version` |
-| `instance_exit` | Clean shutdown | `reason`, `exit_code` |
-| `validation_ok` | After §3 validation passes | none |
-| `validation_failed` | Validation refused start | `reason` |
+| `instance_start` | Process startup, after state load | `ccloop_version`, `cwd`, `git_sha` |
+| `instance_exit` | Cleanup after `runLoop` returns | `reason`, `exit_code` |
 | `step_start` | Pre-flight begins | none |
-| `step_end` | Post-flight completes | `subtype`, `stop_reason`, `duration_ms`, `cost_usd`, `commit_sha` |
+| `step_end` | Post-flight completes | `subtype`, `stop_reason`, `duration_ms`, `cost_usd`, `commit_sha`, `commit_subject`, `outcome` |
 | `step_failed` | Step failure | `category`, `error_excerpt` |
-| `tool_call` | SDK reports tool use | `tool`, `input_summary` (capped) |
-| `pause_enter` | §8 pause begins | `reason`, `pause_until`, `window` |
+| `pause_enter` | §8 pause begins | `reason`, `until`, `window` |
 | `pause_exit` | Pause ends | `wake_reason` |
-| `escalate` | §9 escalation | `reason`, `failure_trail` |
+| `escalate` | §9 escalation | `reason` |
+| `escalation_resolved` | Operator picked an action at the escalation menu | `action` (`continue` / `revert` / `edit_spec` / `quit`) |
 | `guardrail_trip` | §10 trip | `which`, `limit`, `actual` |
-| `notification_sent` | Push or webhook fired | `channel`, `status` |
-| `compact_boundary` | SDK auto-compaction | none |
-| `done` | DONE.md detected | `step`, `final_commit_sha` |
+| `notification_sent` | Push/webhook channel attempt resolved | `channel`, `ok`, `status`, `error?` |
+| `usage_degraded` | Proactive usage endpoint unavailable / rate-limited | `status`, `reason` |
+| `cache_warning` | Cache hit rate below threshold for N consecutive steps (§11) | `streak`, `rate` |
+| `recovery_commit` | §10.4 dirty-tree recovery committed unsaved work from a crashed prior instance | `commit_sha`, `commit_subject` |
+| `done` | DONE.md detected | `final_commit_sha` |
 
 Unknown event types are not validated — append-only and tolerant.
 
