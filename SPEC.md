@@ -89,7 +89,7 @@ Pinned terms used by this spec:
       run the build loop; otherwise, run the design loop. Explicit
       `ccloop design` and `ccloop build` always honor the verb
       regardless of state.
-- [ ] **Configuration.** `ccloop.toml` gains a `[design]` section.
+- [x] **Configuration.** `ccloop.toml` gains a `[design]` section.
       MVP keys: `model` (defaults to Claude Opus, independently
       configurable from `[build].model`), `max_turns` (per `query`
       call; default generous since this is interactive). CLI flags:
