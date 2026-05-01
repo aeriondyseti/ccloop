@@ -24,7 +24,7 @@ Pinned terms used by this spec:
 
 ## Scope
 
-- [ ] **Shared TUI components.** Extract reusable Ink components from
+- [x] **Shared TUI components.** Extract reusable Ink components from
       the existing build-loop TUI: header (state · cost · tokens ·
       cwd), cost/cache strip, sandbox indicator, focusable-pane
       primitives. Move to `src/tui/shared/`. Build loop continues to
