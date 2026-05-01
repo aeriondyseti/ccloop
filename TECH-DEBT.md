@@ -1,49 +1,33 @@
 # Tech debt
 
-## TUI flicker on content updates
+(none currently tracked)
 
-**Symptom.** When `now` or `log` panes receive new content, the
-affected region briefly flickers. Severity correlates with how much
-of the visible region changes per paint, not with tick rate.
+---
 
-**Diagnosis (2026-05-01).** Ruled out, in order:
+## Resolved
 
-- `ink-scroll-view`: swapping `LogPane` to a plain `<Box>` +
-  tail-slice did not change flicker. Both panes flickered equally.
-- Tick rate: raising `TUI_TICK_MS` from 250 → 1000 didn't reduce
-  flicker proportionally. Flicker is per visible paint, not per
-  tick.
-- Layout shift: `flexShrink={0}` default on `Pane` (kept) fixed an
-  unrelated problem where `NowPane` content overflow was squeezing
-  sibling panes — but didn't affect flicker.
+### TUI flicker on content updates (resolved 2026-05-01)
 
-**Root cause.** Ink's render strategy on a frame change is
-clear-region + rewrite-region. Tail-pinned panes (`LogPane` slice,
-`NowPane` auto-tail) shift every visible line on each append, so
-each "small" content update is in fact a full-window rewrite. The
-brief blank moment between clear and rewrite is the visible
-flicker. Structural to Ink, not a fixable bug at the React-tree
-level.
+Investigated and fixed by upgrading Ink 5 → 6 (which required
+React 18 → 19). Ink 6 ships:
 
-**Mitigations that don't work.**
+- **Synchronized output** (DEC mode 2026): the terminal buffers
+  writes between begin/end markers so the frame swap is atomic.
+  Automatic in supporting terminals (Kitty, WezTerm, Ghostty,
+  recent Konsole/iTerm2).
+- **`incrementalRendering`**: only emits ANSI for changed lines
+  instead of clear+rewrite of the whole frame region.
+- **`maxFps`**: built-in render throttle (default 30).
+- **Concurrent rendering** (opt-in): React 19 concurrent root.
 
-- Memoize / skip equal-frame rerenders: the flickering paints are
-  the necessary ones, so skipping doesn't help.
-- Reduce visible window: still a full-window shift on append.
-- Cap `nowBuffer`: reduces reconciliation cost, paint cost
-  identical.
+Also fixed the character-width handling issue we'd seen earlier.
 
-**Real fixes.**
+Both options are wired up in `src/cli/run.ts` at the `render()`
+call. The skip-if-unchanged guard around `ink.rerender()` is now
+belt-and-suspenders — Ink throttles internally — but kept because
+it still avoids React reconciliation work on no-op ticks.
 
-1. Restructure log as Ink `<Static>` (append-only, written above
-   the live region — breaks the bordered-pane layout).
-2. Switch the renderer to a framebuffer-diffing engine (Rezi /
-   Zireael, notcurses, ratatui-via-WASM). Emits ANSI only for
-   changed cells, no clear-then-rewrite. Estimated 3–5 focused
-   days for a Rezi port, plus ongoing pre-alpha API risk until
-   Rezi stabilizes. See conversation 2026-05-01 for the port
-   sketch.
-3. Accept the flicker for now.
-
-Current decision: accept. Revisit when Rezi reaches beta or if a
-user reports flicker as a blocker.
+If flicker resurfaces, suspects in order: (1) terminal doesn't
+support DEC 2026 → upgrade terminal or accept; (2) Ink regression
+→ pin version; (3) something writing to stdout outside Ink (we
+already guard `process.stderr.write` to non-TTY mode).

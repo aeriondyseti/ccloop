@@ -377,6 +377,23 @@ export async function runRun(argv: string[]): Promise<number> {
   const ink = stdoutIsTty
     ? render(React.createElement(Dashboard, { view, onInterrupt }), {
         exitOnCtrlC: false,
+        // Ink 6 flicker mitigations:
+        //  - incrementalRendering: only emit ANSI for changed lines
+        //    instead of clear+rewrite of the whole frame region. This
+        //    is the primary fix for the flicker we saw on non-change
+        //    ticks; combined with the synchronized-output protocol
+        //    (DEC mode 2026, automatic in supporting terminals) the
+        //    frame swap becomes atomic.
+        //  - concurrent: opt into React 19's concurrent rendering;
+        //    enables future use of useDeferredValue / useTransition
+        //    for streaming work. Has no immediate behavioral effect
+        //    here but makes the renderer interruptible.
+        //  - maxFps: defaults to 30 already; explicit so the cap is
+        //    visible at the call site. Our tick is 10Hz plus a
+        //    skip-if-unchanged guard, well under the cap.
+        incrementalRendering: true,
+        concurrent: true,
+        maxFps: 30,
       })
     : null;
   // Ink writes the full frame on every rerender() call regardless of
@@ -528,7 +545,7 @@ export async function runRun(argv: string[]): Promise<number> {
     if (ink) {
       cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
       menuKeyHandler = null; // suppress key wiring on the final paint
-      renderNow();
+      renderNow(true);
       ink.unmount();
     }
     leaveAltScreen();

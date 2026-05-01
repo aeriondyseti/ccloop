@@ -83,8 +83,8 @@ interface ScrollKeys {
    *  manual scroll-up; resets on Home/End or when the user scrolls
    *  back to the bottom. Used to gate auto-scroll-to-bottom on new
    *  content. */
-  userScrolledRef: React.MutableRefObject<boolean>;
-  scrollRef: React.RefObject<ScrollViewRef>;
+  userScrolledRef: React.RefObject<boolean>;
+  scrollRef: React.RefObject<ScrollViewRef | null>;
 }
 
 export function useScrollKeys({ focused, userScrolledRef, scrollRef }: ScrollKeys): void {
@@ -120,8 +120,8 @@ export function useScrollKeys({ focused, userScrolledRef, scrollRef }: ScrollKey
 
 export function useAutoTail(
   contentLength: number,
-  userScrolledRef: React.MutableRefObject<boolean>,
-  scrollRef: React.RefObject<ScrollViewRef>,
+  userScrolledRef: React.RefObject<boolean>,
+  scrollRef: React.RefObject<ScrollViewRef | null>,
 ): void {
   const last = useRef(contentLength);
   useEffect(() => {
