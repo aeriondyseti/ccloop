@@ -29,7 +29,7 @@ Pinned terms used by this spec:
       cwd), cost/cache strip, sandbox indicator, focusable-pane
       primitives. Move to `src/tui/shared/`. Build loop continues to
       work unchanged after extraction.
-- [ ] **`ask_user` MCP tool.** Implement an in-process MCP server
+- [x] **`ask_user` MCP tool.** Implement an in-process MCP server
       exposing one tool, `ask_user`, with input schema `{ question,
       options: [{label, description}], multi_select?: boolean }`.
       Tool invocation suspends the agent, renders an interactive
