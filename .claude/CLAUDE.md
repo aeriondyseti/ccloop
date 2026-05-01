@@ -19,22 +19,34 @@ Two other files set context:
 - **`IDEAS.md`** — sibling-project ideas. Not part of ccloop. Ignore
   unless explicitly directed.
 
-## Two specs exist — don't confuse them
+## Three specs exist — don't confuse them
 
-This repo has TWO files named `SPEC.md` in different roles:
+This repo has THREE files named `SPEC.md` in different roles:
 
 - **`.claude/SPEC.md`** — *ccloop's own spec*. The build contract
-  for this codebase. This is what you read.
+  for this codebase. This is what you read before making
+  substantive changes.
 - **`templates/SPEC.md`** — *an example/starter spec for users of
   ccloop*. Shipped as a scaffold for `ccloop init` to copy. NOT a
   spec for ccloop itself.
+- **`./SPEC.md`** (repo root) — *a dogfood-mode spec*. Present when
+  the user is running ccloop **on this repo** to build a new ccloop
+  feature. It describes the feature being built right now (e.g.,
+  the design loop), not ccloop as a whole. Treat it the same way
+  ccloop normally treats `./SPEC.md` in any target project: it is
+  the build target for the current run.
 
-When this repo's spec says "the spec," it means a target project's
-spec (whatever the user puts at `./SPEC.md` when they run ccloop).
-ccloop's own spec is referred to by path: `.claude/SPEC.md`.
+When `.claude/SPEC.md` says "the spec," it means whatever
+`./SPEC.md` is in the project ccloop is being run against. Inside
+this repo, that overlaps with the dogfood spec at `./SPEC.md` — the
+ccloop-on-ccloop case.
 
-The repo root has no `SPEC.md` on purpose, so pattern-matching
-"find the spec" never lands on the wrong file.
+If you need to change ccloop's own contract (vocabulary, iteration
+model, etc.), that lives in `.claude/SPEC.md`. If you're
+implementing the feature described at `./SPEC.md`, that's the
+dogfood target — finish the checklist, write `DONE.md`, don't
+edit `.claude/SPEC.md` unless the feature genuinely changes the
+contract.
 
 ## Vocabulary cheatsheet
 
