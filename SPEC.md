@@ -60,7 +60,7 @@ Pinned terms used by this spec:
       fragments walk the agent through vision → users → scope →
       architecture → milestones → acceptance. The agent is told to
       complete each phase before advancing. No phase-hopping in MVP.
-- [ ] **Sibling artifacts.** Beyond `spec.draft.md`, the agent may
+- [x] **Sibling artifacts.** Beyond `spec.draft.md`, the agent may
       also write `./.ccloop/design/ROADMAP.md` (explicit non-goals /
       future scope), `./.ccloop/design/IDEAS.md` (parking-lot ideas),
       and `./.ccloop/design/TECH-DEBT.md` (intentional shortcuts /
@@ -95,7 +95,7 @@ Pinned terms used by this spec:
       call; default generous since this is interactive). CLI flags:
       `--model`, `--no-tui` (plain-stdio fallback for non-TTY
       environments — chat only, no live draft pane).
-- [ ] **Lifecycle events.** Emit to `./.ccloop/events.jsonl` (same
+- [x] **Lifecycle events.** Emit to `./.ccloop/events.jsonl` (same
       file the build loop uses): `design_session_start`,
       `design_phase_enter`, `ask_user_asked`, `ask_user_answered`,
       `draft_edit`, `design_session_accept`, `design_session_abort`,

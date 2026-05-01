@@ -48,3 +48,9 @@ export {
   promoteDraft,
   saveDraft,
 } from "./draft.ts";
+
+// Event emission
+export {
+  DesignEventEmitter,
+  createDesignEventEmitter,
+} from "./events.ts";
