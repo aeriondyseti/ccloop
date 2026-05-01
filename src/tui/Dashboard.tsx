@@ -122,7 +122,7 @@ function NowPane({ view, focus }: FocusableProps): React.ReactElement {
   if (view.nowContent.length === 0) {
     return (
       <Pane title={title} role="focusable" focused={focused}
-            titleRight={titleRight} flexGrow={1}>
+            titleRight={titleRight} flexGrow={1} flexShrink={1}>
         <Text dimColor>(waiting for the next turn…)</Text>
       </Pane>
     );
@@ -130,7 +130,7 @@ function NowPane({ view, focus }: FocusableProps): React.ReactElement {
 
   return (
     <Pane title={title} role="focusable" focused={focused}
-          titleRight={titleRight} flexGrow={1}>
+          titleRight={titleRight} flexGrow={1} flexShrink={1}>
       <ScrollView ref={ref}>
         {view.nowContent.map((e, i) => (
           <TurnEventRow key={`${i}-${e.kind}`} event={e} />
