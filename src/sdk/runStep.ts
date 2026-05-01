@@ -1,4 +1,12 @@
-import { query as defaultQuery, type HookCallback } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query as defaultQuery,
+  type HookCallback,
+  type Options,
+  type SDKMessage,
+  type SDKAssistantMessage,
+  type SDKResultMessage,
+  type NonNullableUsage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { openSdkDebugSink } from "./debugDump.ts";
 
 type QueryImpl = typeof defaultQuery;
@@ -20,7 +28,7 @@ export interface RunStepInput {
   /** External cancel signal — wired to SIGINT/SIGTERM. */
   abortController?: AbortController;
   /** Stream observer; called for every SDK message. Errors are swallowed. */
-  onMessage?: (msg: unknown) => void;
+  onMessage?: (msg: SDKMessage) => void;
   /** PreToolUse hook (per §6.5). Pre-empts the CLI's hardcoded
    *  command-prefix / shell-operator / file-write pre-checks so our
    *  denylist + sandbox wrap is the only trust boundary. */
@@ -57,6 +65,7 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   let subtype: StepResult["subtype"] = "error_during_execution";
   let numTurns = 0;
   let totalCost = 0;
+  let isError = false;
 
   let prompt = input.prompt;
   let resume = input.resumeSessionId;
@@ -77,7 +86,7 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
     });
     const q = queryImpl({ prompt, options: sdkOptions });
 
-    let lastResultUsage: Record<string, unknown> | undefined;
+    let lastResultUsage: NonNullableUsage | undefined;
     for await (const msg of q) {
       debugSink?.message(msg);
       try {
@@ -86,32 +95,23 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
         // Observers must not break the step.
       }
 
-      const m = msg as Record<string, unknown>;
-      if (typeof m.session_id === "string" && m.session_id.length > 0) {
-        sessionId = asSessionId(m.session_id);
-      }
+      if (msg.session_id) sessionId = asSessionId(msg.session_id);
 
-      if (m.type === "assistant") {
-        const inner = (m.message as Record<string, unknown> | undefined) ?? {};
-        const sr = inner.stop_reason;
-        if (typeof sr === "string") stopReason = sr as StepResult["stop_reason"];
-        const innerUsage = inner.usage as Record<string, unknown> | undefined;
-        if (innerUsage) accumulateUsage(usage, innerUsage);
-        const turnText = extractText(inner.content);
-        if (turnText) assistantTurns.push(turnText);
-      }
-
-      if (m.type === "result") {
-        subtype = (m.subtype as StepResult["subtype"]) ?? subtype;
-        numTurns += numberOr(m.num_turns, 0);
-        totalCost += numberOr(m.total_cost_usd, 0);
-        lastResultUsage = m.usage as Record<string, unknown> | undefined;
-        if (Array.isArray(m.errors)) {
-          for (const e of m.errors) if (typeof e === "string") errors.push(e);
+      if (msg.type === "assistant") {
+        handleAssistant(msg, usage, assistantTurns, (sr) => { stopReason = sr; });
+      } else if (msg.type === "result") {
+        subtype = msg.subtype;
+        numTurns += msg.num_turns;
+        totalCost += msg.total_cost_usd;
+        lastResultUsage = msg.usage;
+        if (msg.subtype !== "success" && Array.isArray(msg.errors)) {
+          for (const e of msg.errors) errors.push(e);
         }
-        if (typeof (m as { result?: unknown }).result === "string") {
-          resultText = (m as { result: string }).result;
-        }
+        if (msg.subtype === "success") resultText = msg.result;
+        // Sticky: any errored result message marks the step as errored.
+        // The synthetic "Prompt is too long" reply has subtype: "success"
+        // with is_error: true; classifyStep relies on this flag.
+        if (msg.is_error) isError = true;
       }
     }
 
@@ -147,6 +147,7 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
     session_id: sessionId,
     final_text: finalText,
     errors,
+    is_error: isError,
   };
   debugSink?.finish(stepResult);
   return stepResult;
@@ -170,9 +171,9 @@ export function effortToThinkingTokens(effort: string): number | undefined {
 function buildSdkOptions(
   input: RunStepInput,
   resume: SessionId | null,
-): Record<string, unknown> {
+): Options {
   const yolo = input.config.claude.yolo_mode;
-  const opts: Record<string, unknown> = {
+  const opts: Options = {
     cwd: input.cwd,
     includePartialMessages: true,
     maxTurns: input.config.claude.max_turns_per_step,
@@ -194,24 +195,37 @@ function buildSdkOptions(
   return opts;
 }
 
-function accumulateUsage(into: StepUsage, raw: Record<string, unknown>): void {
-  into.input_tokens += numberOr(raw.input_tokens, 0);
-  into.output_tokens += numberOr(raw.output_tokens, 0);
-  into.cache_read_input_tokens += numberOr(raw.cache_read_input_tokens, 0);
-  into.cache_creation_input_tokens += numberOr(raw.cache_creation_input_tokens, 0);
+/** Drain an assistant message into per-step accumulators. Pulled out
+ *  so the iterator hot path stays readable. */
+function handleAssistant(
+  msg: SDKAssistantMessage,
+  usage: StepUsage,
+  turns: string[],
+  setStopReason: (sr: StepResult["stop_reason"]) => void,
+): void {
+  const inner = msg.message;
+  if (inner.stop_reason) setStopReason(inner.stop_reason as StepResult["stop_reason"]);
+  if (inner.usage) accumulateUsage(usage, inner.usage);
+  const turnText = extractAssistantText(inner.content);
+  if (turnText) turns.push(turnText);
 }
 
-function numberOr(v: unknown, fallback: number): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+function accumulateUsage(into: StepUsage, raw: NonNullableUsage): void {
+  into.input_tokens += raw.input_tokens;
+  into.output_tokens += raw.output_tokens;
+  into.cache_read_input_tokens += raw.cache_read_input_tokens;
+  into.cache_creation_input_tokens += raw.cache_creation_input_tokens;
 }
 
-function extractText(content: unknown): string {
+/** Extract concatenated text from an APIAssistantMessage's `content`.
+ *  The Anthropic SDK types `content` as a discriminated union of
+ *  ContentBlock variants; we only pull from `text` blocks. */
+function extractAssistantText(content: SDKAssistantMessage["message"]["content"]): string {
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content) {
-    if (block && typeof block === "object") {
-      const b = block as Record<string, unknown>;
-      if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+    if (block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
     }
   }
   return parts.join("\n").trim();

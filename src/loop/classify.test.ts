@@ -7,7 +7,7 @@ function r(p: Partial<StepResult>): StepResult {
   return {
     subtype: "success", stop_reason: "end_turn", num_turns: 1,
     total_cost_usd: 0, duration_ms: 0, usage: emptyUsage(),
-    session_id: asSessionId(""), final_text: "", errors: [], ...p,
+    session_id: asSessionId(""), final_text: "", errors: [], is_error: false, ...p,
   };
 }
 
@@ -44,6 +44,21 @@ describe("classifyStep", () => {
   test("error_max_budget_usd", () => {
     expect(classifyStep(r({ subtype: "error_max_budget_usd" })))
       .toMatchObject({ outcome: "failure", category: "max_budget" });
+  });
+  test("is_error with 'Prompt is too long' → context_overflow", () => {
+    expect(classifyStep(r({
+      subtype: "success", is_error: true, final_text: "Prompt is too long",
+    }))).toMatchObject({ outcome: "failure", category: "context_overflow" });
+  });
+  test("is_error with unrelated text → sdk", () => {
+    expect(classifyStep(r({
+      subtype: "success", is_error: true, final_text: "Some other failure",
+    }))).toMatchObject({ outcome: "failure", category: "sdk" });
+  });
+  test("is_error+context match in errors array also classified", () => {
+    expect(classifyStep(r({
+      subtype: "success", is_error: true, errors: ["input is too long"],
+    }))).toMatchObject({ outcome: "failure", category: "context_overflow" });
   });
 });
 

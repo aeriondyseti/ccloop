@@ -39,7 +39,7 @@ describe("integration: stepOnce with real git", () => {
         return {
           subtype: "success", stop_reason: "end_turn", num_turns: 1,
           total_cost_usd: 0.01, duration_ms: 100, usage: emptyUsage(),
-          session_id: asSessionId("sess-1"), final_text: "Wrote out.txt", errors: [],
+          session_id: asSessionId("sess-1"), final_text: "Wrote out.txt", errors: [], is_error: false,
         };
       },
     });

@@ -24,6 +24,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { Options, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { StepResult } from "./types.ts";
 
 export const SDK_DEBUG_ENV = "CCLOOP_SDK_DEBUG";
 
@@ -31,18 +33,20 @@ export function sdkDebugEnabled(): boolean {
   return process.env[SDK_DEBUG_ENV] === "1";
 }
 
+export interface SdkDebugAttemptPayload {
+  prompt: string;
+  resumeSessionId: string | null;
+  options: Options;
+}
+
 export interface SdkDebugSink {
   /** Called once per SDK query (the outer while loop in runStep).
    *  `attempt` is the continuation index (0 = initial query). */
-  startAttempt(
-    attempt: number,
-    payload: { prompt: string; resumeSessionId: string | null;
-               options: Record<string, unknown> },
-  ): void;
+  startAttempt(attempt: number, payload: SdkDebugAttemptPayload): void;
   /** Called for every SDK message in the current attempt. */
-  message(msg: unknown): void;
+  message(msg: SDKMessage): void;
   /** Called once at end-of-step with the aggregated result. */
-  finish(result: unknown): void;
+  finish(result: StepResult): void;
 }
 
 /** Returns null when debug is off — call sites should skip work. */
