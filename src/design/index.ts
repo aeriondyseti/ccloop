@@ -54,3 +54,13 @@ export {
   DesignEventEmitter,
   createDesignEventEmitter,
 } from "./events.ts";
+
+// Session management
+export {
+  saveSessionMetadata,
+  loadSessionMetadata,
+  loadSessionMetadataIfExists,
+  createSessionMetadata,
+  updateSessionMetadata,
+  isSessionResumable,
+} from "./session.ts";
