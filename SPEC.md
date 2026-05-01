@@ -41,7 +41,7 @@ Pinned terms used by this spec:
       seeded from `templates/SPEC.md`, opens a single SDK `query`
       session with the design system prompt, runs until user accepts
       or aborts.
-- [ ] **Sandboxed agent tools.** The design agent gets:
+- [x] **Sandboxed agent tools.** The design agent gets:
       `Read`/`Grep`/`Glob` (read-only, anywhere in CWD),
       `Edit`/`Write` (path-restricted to `./.ccloop/design/` only —
       reuse the build-loop's permission hook),

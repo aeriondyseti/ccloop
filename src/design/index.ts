@@ -64,3 +64,9 @@ export {
   updateSessionMetadata,
   isSessionResumable,
 } from "./session.ts";
+
+// Sandbox approver
+export {
+  makeDesignApprover,
+  type DesignApproverOptions,
+} from "./approver.ts";
