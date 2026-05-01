@@ -15,6 +15,7 @@ import {
 import { acquireLock, LockHeldError } from "../state/lock.ts";
 import { LoopDriver } from "../loop/driver.ts";
 import { runLoop } from "../loop/orchestrator.ts";
+import { createPauseGate } from "../loop/pauseGate.ts";
 import { EventBus } from "../loop/eventBus.ts";
 import { UsageClient } from "../usage/client.ts";
 import { loadOAuthToken } from "../auth/loadToken.ts";
@@ -344,6 +345,19 @@ export async function runRun(argv: string[]): Promise<number> {
   // GUARDRAIL_TRIP prompts; the tick threads it through Dashboard
   // props on every render so useMenuKey has a current handler.
   let menuKeyHandler: ((key: MenuKey) => void) | null = null;
+  // Per-instance operator pause toggle. In-memory only — restarting
+  // ccloop resumes running. The TUI binds `p` to `pauseGate.toggle`;
+  // the orchestrator parks at the top of the next loop iteration if
+  // the gate is set.
+  const pauseGate = createPauseGate();
+  // Repaint immediately when the gate flips so the operator gets
+  // visual feedback on press, not on the next tick. Defer via
+  // setTimeout(0) — onChange fires inside Ink's useInput handler
+  // and rerendering inside the same React render call stack is
+  // unsafe.
+  pauseGate.onChange(() => {
+    if (stdoutIsTty) setTimeout(() => renderNow(true), 0);
+  });
   const onInterrupt = (): void => {
     const now = Date.now();
     if (interrupting && now - firstInterruptAt < FORCE_EXIT_WINDOW_MS) {
@@ -375,7 +389,10 @@ export async function runRun(argv: string[]): Promise<number> {
   process.on("exit", leaveAltScreen);
 
   const ink = stdoutIsTty
-    ? render(React.createElement(Dashboard, { view, onInterrupt }), {
+    ? render(React.createElement(Dashboard, {
+        view, onInterrupt,
+        onTogglePause: () => { pauseGate.toggle(); },
+      }), {
         exitOnCtrlC: false,
         // Ink 6 flicker mitigations:
         //  - incrementalRendering: only emit ANSI for changed lines
@@ -410,6 +427,7 @@ export async function runRun(argv: string[]): Promise<number> {
       state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
       cachedRecent, finalCommitSha,
       undefined, interrupting, cadenceWait, cachedChecklist,
+      pauseGate.isPaused(),
     );
     if (!force) {
       const cadenceS = view.cadenceWait
@@ -438,6 +456,7 @@ export async function runRun(argv: string[]): Promise<number> {
     }
     ink.rerender(React.createElement(Dashboard, {
       view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
+      onTogglePause: () => { pauseGate.toggle(); },
     }));
   };
   if (usageClient) void usageClient.get();
@@ -505,6 +524,7 @@ export async function runRun(argv: string[]): Promise<number> {
         usage: usageClient,
         notifyOptions: { pushUrl: config.notify.push_url, webhookUrl: config.notify.webhook_url },
         heartbeatUrl: config.notify.heartbeat_url,
+        pauseGate,
       });
       if (outcome.kind === "done") { exitCode = 0; resolved = true; }
       else if (outcome.kind === "guardrail_trip") {
@@ -640,6 +660,10 @@ function eventToLine(e: { ts: string; type: string } & Record<string, unknown>):
       return `${t}  pause: ${String(e.reason ?? "")} (${String(e.window ?? "")})`;
     case "pause_exit":
       return `${t}  resume: ${String(e.wake_reason ?? "")}`;
+    case "operator_pause_enter":
+      return `${t}  pause: operator`;
+    case "operator_pause_exit":
+      return `${t}  resume: operator`;
     case "escalate":
       return `${t}  escalate: ${String(e.reason ?? "")}`;
     case "guardrail_trip":
@@ -780,6 +804,7 @@ function buildView(
   interrupting = false,
   cadenceWait: { startedAt: string; totalMs: number } | null = null,
   checklist: { done: number; total: number } | null = null,
+  operatorPaused = false,
 ): TuiViewModel {
   const snapshot = usage?.lastSnapshot() ?? null;
   return project({
@@ -796,5 +821,6 @@ function buildView(
     checklist,
     now: new Date(),
     finalCommitSha,
+    operatorPaused,
   });
 }

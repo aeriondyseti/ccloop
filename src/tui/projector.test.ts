@@ -165,4 +165,33 @@ describe("project", () => {
     expect(v.state).toBe("PAUSED");
     expect(v.pause?.reason).toBe("5h cap");
   });
+
+  test("operatorPaused projects to OPERATOR_PAUSED when state is running", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      operatorPaused: true,
+    });
+    expect(v.state).toBe("OPERATOR_PAUSED");
+    expect(v.controlsHint).toMatch(/p resume/);
+  });
+
+  test("operatorPaused does NOT override terminal states", () => {
+    const s = freshState();
+    s.state = "escalated";
+    s.escalation = { reason: "weekly_cap", trail: [], entered_at: asIsoTimestamp("") };
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      operatorPaused: true,
+    });
+    expect(v.state).toBe("ESCALATED");
+  });
+
+  test("RUNNING controls hint advertises p pause", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.controlsHint).toMatch(/p pause/);
+  });
 });

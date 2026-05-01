@@ -5,8 +5,8 @@
 import type { UsageSnapshot } from "../usage/client.ts";
 
 export type TuiState =
-  | "STARTING" | "RUNNING" | "PAUSED" | "ESCALATED"
-  | "GUARDRAIL_TRIP" | "DONE";
+  | "STARTING" | "RUNNING" | "PAUSED" | "OPERATOR_PAUSED"
+  | "ESCALATED" | "GUARDRAIL_TRIP" | "DONE";
 
 /**
  * One entry in the live "now" pane. The pane is cleared at each step

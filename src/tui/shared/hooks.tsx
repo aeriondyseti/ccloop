@@ -132,6 +132,25 @@ export function useAutoTail(
   }, [contentLength, userScrolledRef, scrollRef]);
 }
 
+// ===== Operator pause toggle =====
+
+/** Listen for the lowercase `p` key and call `onToggle`. Only active
+ *  when `active` is true — typically gated to RUNNING / OPERATOR_PAUSED
+ *  so the pause hotkey doesn't intercept the same letter on the
+ *  ESCALATED menu. */
+export function usePauseKey(
+  active: boolean,
+  onToggle: (() => void) | undefined,
+): void {
+  const kb = useKeyboardAvailable();
+  useInput((input, key) => {
+    debugKey(`pause(active=${active && !!onToggle})`, input, key);
+    if (!onToggle) return;
+    if (key.ctrl || key.meta) return;
+    if (input.toLowerCase() === "p") onToggle();
+  }, { isActive: kb && active && !!onToggle });
+}
+
 // ===== Menu key handling =====
 
 export type MenuKey = "c" | "r" | "e" | "q";

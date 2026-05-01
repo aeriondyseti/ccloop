@@ -5,6 +5,22 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Added
+- **Operator pause** (`p` to toggle while RUNNING / OPERATOR_PAUSED).
+  Per-instance, in-memory; not durable — restarting ccloop resumes
+  running. Distinct from rate-limit pauses (which set
+  `state.state = "paused"` and persist to `state.json`); operator
+  pause is layered on top of a healthy run via the new
+  `pauseGate.ts` utility and a corresponding `OPERATOR_PAUSED` TUI
+  state. The orchestrator parks at the top of the next loop
+  iteration when the gate is set, so pressing `p` mid-step lets the
+  in-flight step + cadence sleep complete naturally before pausing
+  — no work is interrupted. New durable events
+  `operator_pause_enter` / `operator_pause_exit` write to
+  `events.jsonl` so the wake-up recap can attribute idle time
+  correctly. New hook `usePauseKey` in `tui/shared/hooks.tsx`;
+  Dashboard's RUNNING controls hint now leads with `p pause` and
+  the OPERATOR_PAUSED hint with `p resume`. The pause hotkey is
+  gated to RUNNING / OPERATOR_PAUSED only.
 - **SDK debug dump** (`CCLOOP_SDK_DEBUG=1`, auto-set by `--debug`).
   When enabled, `runStep` writes per-step artifacts under
   `.ccloop/sdk-debug/step-<NNNN>/`: `input-<attempt>.json` (rendered

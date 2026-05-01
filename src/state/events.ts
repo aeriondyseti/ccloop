@@ -11,6 +11,8 @@ export type EventType =
   | "step_failed"
   | "pause_enter"
   | "pause_exit"
+  | "operator_pause_enter"
+  | "operator_pause_exit"
   | "escalate"
   | "escalation_resolved"
   | "guardrail_trip"

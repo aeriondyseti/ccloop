@@ -20,6 +20,7 @@ import { type DriverEvent, type LoopDriver, type StepStatus } from "./driver.ts"
 import { EventLogger } from "../state/events.ts";
 import { abortableSleep } from "./sleep.ts";
 import { type EventBus } from "./eventBus.ts";
+import type { PauseGate } from "./pauseGate.ts";
 import {
   type UsageClient,
   type UsageResult,
@@ -50,6 +51,12 @@ export interface OrchestratorOptions {
   /** Test seam — pluggable fetch for heartbeat + notify in tests. */
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** Per-instance operator pause toggle (in-memory; not durable).
+   *  When set, the orchestrator parks at the top of the next loop
+   *  iteration until the gate clears or `abortSignal` aborts. Pause
+   *  takes effect after the in-flight step + cadence sleep complete;
+   *  pressing the toggle mid-step does not abort the step. */
+  pauseGate?: PauseGate;
 }
 
 export type RunOutcome =
@@ -87,6 +94,27 @@ export async function runLoop(
   };
 
   while (!abortSignal.aborted) {
+    // Operator pause: per-instance, in-memory, not durable. Sits
+    // ahead of every other gate so a paused operator can't be woken
+    // by a usage refresh or a state-pause re-entry. Emits durable
+    // enter/exit events so the wake-up recap can attribute idle
+    // time correctly. The first iteration's gate is a no-op (gate
+    // is unset until the operator toggles it).
+    if (opts.pauseGate?.isPaused()) {
+      await emitDurable({
+        run_id: state.run_id,
+        step: state.current_step,
+        type: "operator_pause_enter",
+      });
+      await opts.pauseGate.waitUntilUnpaused(abortSignal);
+      await emitDurable({
+        run_id: state.run_id,
+        step: state.current_step,
+        type: "operator_pause_exit",
+      });
+      if (abortSignal.aborted) return { kind: "cancelled" };
+    }
+
     // Re-enter pause if state already paused (continue case).
     if (state.state === "paused" && state.pause) {
       const paused = await waitOutPause(state, opts, rateLimit);

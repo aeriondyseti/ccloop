@@ -29,21 +29,33 @@ export interface ProjectorInput {
   checklist?: { done: number; total: number } | null;
   now: Date;
   finalCommitSha?: string;
+  /** Operator pause flag — projects as `OPERATOR_PAUSED` when the
+   *  underlying state is `running`. State.json itself is unchanged
+   *  (operator pause is per-instance, not durable). */
+  operatorPaused?: boolean;
 }
 
 const RUN_CONTROLS = "tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · ctrl-c stop";
 
 const CONTROLS: Record<TuiState, string> = {
   STARTING: "ctrl-c quit",
-  RUNNING: RUN_CONTROLS,
+  RUNNING: `p pause · ${RUN_CONTROLS}`,
   PAUSED: RUN_CONTROLS,
+  OPERATOR_PAUSED: "p resume · tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · ctrl-c stop",
   ESCALATED: "c continue · r revert · e edit spec · q quit",
   GUARDRAIL_TRIP: "q quit · e edit ccloop.toml",
   DONE: "tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · q quit",
 };
 
 export function project(input: ProjectorInput): TuiViewModel {
-  const tuiState = stateToTui(input.state.state);
+  // Only project as OPERATOR_PAUSED when the durable state is
+  // running. If state.json says paused/escalated/guardrail_trip/done,
+  // those take precedence — operator pause is layered on top of a
+  // healthy run, not a way to override terminal states.
+  const tuiState =
+    input.operatorPaused && input.state.state === "running"
+      ? "OPERATOR_PAUSED"
+      : stateToTui(input.state.state);
   const elapsedMs =
     input.now.getTime() - Date.parse(input.state.started_at);
 

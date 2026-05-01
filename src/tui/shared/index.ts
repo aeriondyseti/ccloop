@@ -14,6 +14,7 @@ export {
   useScrollKeys,
   useAutoTail,
   useMenuKey,
+  usePauseKey,
   debugKey,
   type MenuKey,
 } from "./hooks.tsx";

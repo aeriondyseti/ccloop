@@ -53,6 +53,8 @@ export type DriverEvent =
   | (EventBase & { type: "escalate"; reason: string })
   | (EventBase & { type: "pause_enter"; reason: string; until: IsoTimestamp; window: string })
   | (EventBase & { type: "pause_exit"; wake_reason: string })
+  | (EventBase & { type: "operator_pause_enter" })
+  | (EventBase & { type: "operator_pause_exit" })
   | (EventBase & { type: "usage_degraded"; status: number | null; reason: string })
   | (EventBase & { type: "cache_warning"; streak: number; rate: number })
   | (EventBase & {

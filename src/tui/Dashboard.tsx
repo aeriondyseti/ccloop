@@ -17,6 +17,7 @@ import {
   useScrollKeys,
   useAutoTail,
   useMenuKey,
+  usePauseKey,
   type MenuKey,
 } from "./shared/index.ts";
 
@@ -34,14 +35,22 @@ export interface DashboardProps {
    *  it, Ink would unmount the React tree on first press while our
    *  loop kept running. */
   onInterrupt?: () => void;
+  /** Operator pause toggle. Active in RUNNING / OPERATOR_PAUSED only;
+   *  bound to the lowercase `p` key. */
+  onTogglePause?: () => void;
 }
 
 const FOCUS_ORDER: readonly FocusTarget[] = ["now", "log"];
 
 export function Dashboard({
-  view, onMenuKey, onInterrupt,
+  view, onMenuKey, onInterrupt, onTogglePause,
 }: DashboardProps): React.ReactElement {
   useCtrlC(onInterrupt);
+  // Pause hotkey is only live while the run is in a state where
+  // pausing is meaningful. Other states (escalated/guardrail/done)
+  // either have their own menu or are terminal.
+  const pauseActive = view.state === "RUNNING" || view.state === "OPERATOR_PAUSED";
+  usePauseKey(pauseActive, onTogglePause);
   return <Frame>{pickScreen(view, onMenuKey)}</Frame>;
 }
 
@@ -53,6 +62,7 @@ function pickScreen(
     case "STARTING": return <Starting view={view} />;
     case "RUNNING":  return <Running view={view} />;
     case "PAUSED":   return <Paused view={view} />;
+    case "OPERATOR_PAUSED": return <OperatorPaused view={view} />;
     case "ESCALATED": return <Escalated view={view} onMenuKey={onMenuKey} />;
     case "GUARDRAIL_TRIP": return <GuardrailTrip view={view} onMenuKey={onMenuKey} />;
     case "DONE": return <Done view={view} />;
@@ -65,6 +75,7 @@ function BuildLoopHeader({ view }: { view: TuiViewModel }): React.ReactElement {
   const stateColor =
     view.state === "RUNNING" ? "green"
     : view.state === "PAUSED" ? "cyan"
+    : view.state === "OPERATOR_PAUSED" ? "yellow"
     : view.state === "ESCALATED" ? "red"
     : view.state === "GUARDRAIL_TRIP" ? "magenta"
     : view.state === "DONE" ? "green"
@@ -253,6 +264,29 @@ function Paused({ view }: { view: TuiViewModel }): React.ReactElement {
       </Pane>
       <UsagePane usage={view.usage} />
       <NowPane view={view} focus={focus} />
+      <LogPane view={view} focus={focus} />
+      <Controls hint={view.controlsHint} />
+    </Box>
+  );
+}
+
+/** Operator-initiated pause. Same layout as RUNNING — the only
+ *  difference is the header colour (yellow), the controls hint
+ *  ("p resume"), and the small banner pane explaining what's
+ *  happening. The loop is parked at the orchestrator's pause-gate
+ *  check; the in-flight step + cadence sleep have already
+ *  completed by the time this screen is visible. */
+function OperatorPaused({ view }: { view: TuiViewModel }): React.ReactElement {
+  const focus = useFocusableLayout(view, FOCUS_ORDER);
+  return (
+    <Box flexDirection="column" flexGrow={1}>
+      <BuildLoopHeader view={view} />
+      <Pane title="paused (operator)">
+        <Text color="yellow">paused between loops — press <Text bold>p</Text> to resume</Text>
+        <Text dimColor>the in-flight step finished; ccloop will start the next step on resume</Text>
+      </Pane>
+      <NowPane view={view} focus={focus} />
+      <UsagePane usage={view.usage} />
       <LogPane view={view} focus={focus} />
       <Controls hint={view.controlsHint} />
     </Box>
