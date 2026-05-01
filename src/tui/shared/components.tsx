@@ -34,13 +34,14 @@ export interface PaneProps {
   focused?: boolean;
   titleRight?: string;
   flexGrow?: number;
+  flexShrink?: number;
   height?: number;
   children?: React.ReactNode;
 }
 
 export function Pane({
   title, role = "static", focused = false,
-  titleRight, flexGrow, height, children,
+  titleRight, flexGrow, flexShrink = 0, height, children,
 }: PaneProps): React.ReactElement {
   const isHot = role === "focusable" && focused;
   const borderStyle = isHot ? "double" : "round";
@@ -54,6 +55,7 @@ export function Pane({
       borderStyle={borderStyle}
       borderColor={borderColor}
       flexGrow={flexGrow}
+      flexShrink={flexShrink}
       height={height}
       paddingX={1}
       overflow="hidden"
