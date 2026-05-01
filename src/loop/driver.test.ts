@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { runtimePaths } from "../state/paths.ts";
 import { type CcloopConfig, DEFAULTS } from "../config/schema.ts";
 import { freshState } from "../state/state.ts";
-import { LoopDriver, isLoopStuck } from "./driver.ts";
+import { type DriverEvent, LoopDriver, isLoopStuck, renderLastError } from "./driver.ts";
+import { EventBus } from "./eventBus.ts";
 import type { StepResult } from "../sdk/types.ts";
 import { emptyUsage } from "../sdk/types.ts";
 import { asSessionId, asSha } from "../branded.ts";
@@ -24,6 +25,42 @@ function mkResult(p: Partial<StepResult> = {}): StepResult {
     ...p,
   };
 }
+
+describe("renderLastError", () => {
+  test("empty when escalation is active or no last_failure", () => {
+    const a = freshState();
+    a.escalation = { reason: "x", trail: [], entered_at: "" as any };
+    expect(renderLastError(a)).toBe("");
+
+    const b = freshState();
+    expect(renderLastError(b)).toBe("");
+  });
+
+  test("uses a fence longer than the longest backtick run in excerpt", () => {
+    const s = freshState();
+    s.last_failure = {
+      category: "sdk",
+      // Excerpt contains a triple-backtick code fence — naive ``` would
+      // close prematurely. Output must use ≥4 backticks for both fences.
+      excerpt: "Tool output:\n```\nactual error\n```\n",
+    };
+    const out = renderLastError(s);
+    expect(out).toContain("````");
+    // Excerpt body present.
+    expect(out).toContain("actual error");
+    // The fence count is consistent: opening and closing match.
+    const fences = out.match(/`{3,}/g) ?? [];
+    expect(fences.length).toBeGreaterThanOrEqual(2);
+    expect(fences[0]).toBe(fences.at(-1));
+  });
+
+  test("uses minimal 3-backtick fence when excerpt has no backticks", () => {
+    const s = freshState();
+    s.last_failure = { category: "sdk", excerpt: "plain error message" };
+    const out = renderLastError(s);
+    expect(out).toContain("```\nplain error message\n```");
+  });
+});
 
 describe("isLoopStuck", () => {
   test("less than n same hashes → false", () => {
@@ -68,6 +105,30 @@ describe("LoopDriver.stepOnce", () => {
     const state = await driver.loadOrInitState();
     const status = await driver.stepOnce(state);
     expect(status.kind).toBe("done");
+  });
+
+  test("checkDoneTransition `forStep` overrides the emitted event step", async () => {
+    // Regression: post-cadence done detection used `state.current_step`
+    // which had already been incremented past the step that did the
+    // work. The events.jsonl `done` line and notify summary then
+    // attributed the achievement to a step that never ran.
+    await writeFile(join(dir, "DONE.md"), "all green");
+    const paths = runtimePaths(dir);
+    const events: DriverEvent[] = [];
+    const bus = new EventBus<DriverEvent>();
+    bus.subscribe((e: DriverEvent) => { events.push(e); });
+    const driver = new LoopDriver(dir, paths, cfg, bus, {
+      runStep: async () => mkResult(),
+      headSha: async () => asSha("abc123"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: false, sha: asSha("abc123"), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    state.current_step = 13; // pretend stepOnce just incremented us
+    await driver.checkDoneTransition(state, /* forStep */ 12);
+    const doneEvts = events.filter((e) => e.type === "done");
+    expect(doneEvts.length).toBe(1);
+    expect(doneEvts[0]?.step).toBe(12);
   });
 
   test("guardrail trip on max_steps", async () => {
@@ -170,5 +231,264 @@ describe("LoopDriver.stepOnce", () => {
     const state = await driver.loadOrInitState();
     await driver.stepOnce(state);
     expect(state.consecutive_failures).toBe(1);
+  });
+
+  test("step_timeout watchdog aborts a hung runStep and records step_timeout", async () => {
+    cfg.claude.step_timeout_seconds = 1; // 1s
+    const paths = runtimePaths(dir);
+    let aborted = false;
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async (input) => {
+        // Simulate the SDK hanging on a stalled stream until aborted.
+        await new Promise<void>((_, reject) => {
+          input.abortController?.signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(new Error("aborted"));
+          });
+        });
+        // Unreachable — abort always fires before this point.
+        return mkResult();
+      },
+      headSha: async () => asSha(""),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: false, sha: asSha(""), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    const start = Date.now();
+    const status = await driver.stepOnce(state);
+    const elapsed = Date.now() - start;
+    expect(aborted).toBe(true);
+    expect(elapsed).toBeLessThan(3000);
+    expect(status.kind).toBe("ran");
+    if (status.kind === "ran") expect(status.outcome).toBe("failure");
+    expect(state.last_failure?.category).toBe("step_timeout");
+    expect(state.consecutive_failures).toBe(1);
+  });
+
+  test("watchdog firing during a successful step does not corrupt classification", async () => {
+    // Race: timer fires (sets watchdogTimedOut + aborts), but the
+    // SDK completes the in-flight message before noticing the
+    // abort. runStep returns success. The unconditional
+    // post-try override used to flip success → step_timeout failure
+    // — corrupting the audit trail for a step that actually worked.
+    cfg.claude.step_timeout_seconds = 1;
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async (input) => {
+        // Simulate watchdog firing AFTER N ms while we're still
+        // running, then completing successfully despite the abort.
+        await new Promise((r) => setTimeout(r, 1100));
+        // SDK didn't notice / didn't propagate the abort; happy
+        // result returned anyway.
+        return mkResult();
+      },
+      headSha: async () => asSha("x"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("x"), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    const status = await driver.stepOnce(state);
+    expect(status.kind).toBe("ran");
+    if (status.kind === "ran") expect(status.outcome).toBe("success");
+    expect(state.last_failure).toBeNull();
+  });
+
+  test("step_timeout=0 disables the watchdog", async () => {
+    cfg.claude.step_timeout_seconds = 0;
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult(),
+      headSha: async () => asSha(""),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("x"), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    const status = await driver.stepOnce(state);
+    expect(status.kind).toBe("ran");
+    if (status.kind === "ran") expect(status.outcome).toBe("success");
+  });
+
+  test("recordSdkInitFailure emits step_failed and updates state", async () => {
+    const paths = runtimePaths(dir);
+    const events: DriverEvent[] = [];
+    const bus = new EventBus<DriverEvent>();
+    bus.subscribe((e: DriverEvent) => { events.push(e); });
+    const driver = new LoopDriver(dir, paths, cfg, bus, {
+      runStep: async () => mkResult(),
+      headSha: async () => asSha(""),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: false, sha: asSha(""), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    const f = await driver.recordSdkInitFailure(state, "model overloaded: 529");
+    expect(f.category).toBe("sdk_init");
+    expect(state.consecutive_failures).toBe(1);
+    expect(state.last_failure?.excerpt).toContain("overloaded");
+    const failed = events.filter((e) => e.type === "step_failed");
+    expect(failed.length).toBe(1);
+  });
+
+  test("gate failure blocks commit and records gate failure", async () => {
+    cfg.loop.gate_command = "exit 1"; // any non-empty triggers the gate
+    const paths = runtimePaths(dir);
+    let committed = false;
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult(),
+      headSha: async () => asSha(""),
+      headDiffHash: async () => null,
+      autoCommit: async () => {
+        committed = true;
+        return { committed: true, sha: asSha("x"), subject: "" };
+      },
+      runGate: async () => ({ ok: false, exitCode: 7, excerpt: "tests failed", timedOut: false }),
+    });
+    const state = await driver.loadOrInitState();
+    const status = await driver.stepOnce(state);
+    expect(committed).toBe(false);
+    expect(status.kind).toBe("ran");
+    if (status.kind === "ran") expect(status.outcome).toBe("failure");
+    expect(state.last_failure?.category).toBe("gate");
+    expect(state.last_failure?.excerpt).toBe("tests failed");
+  });
+
+  test("gate skipped when gate_command is empty", async () => {
+    const paths = runtimePaths(dir);
+    let gateRan = false;
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult(),
+      headSha: async () => asSha("x"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("x"), subject: "" }),
+      runGate: async () => {
+        gateRan = true;
+        return { ok: true, exitCode: 0, excerpt: "", timedOut: false };
+      },
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(gateRan).toBe(false);
+  });
+
+  test("failed step records last_failure for next prompt", async () => {
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () =>
+        mkResult({ subtype: "error_during_execution", errors: ["boom: tests failed"] }),
+      headSha: async () => asSha(""),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: false, sha: asSha(""), subject: "" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.last_failure).not.toBeNull();
+    expect(state.last_failure?.excerpt.length).toBeGreaterThan(0);
+  });
+
+  test("3 consecutive low cache-hit-rate steps emits cache_warning once", async () => {
+    const paths = runtimePaths(dir);
+    // 100 fresh input + 0 cached read + 0 creation → rate = 0.0 < 0.5.
+    const lowCacheUsage = { ...emptyUsage(), input_tokens: 100 };
+    const events: DriverEvent[] = [];
+    const bus = new EventBus<DriverEvent>();
+    bus.subscribe((e: DriverEvent) => { events.push(e); });
+    const driver = new LoopDriver(dir, paths, cfg, bus, {
+      runStep: async () => mkResult({ usage: lowCacheUsage, session_id: asSessionId("s1") }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    await driver.stepOnce(state);
+    await driver.stepOnce(state);
+    const warnings = events.filter((e) => (e as { type: string }).type === "cache_warning");
+    expect(warnings).toHaveLength(1);
+    expect((warnings[0] as { streak?: number } | undefined)?.streak).toBe(3);
+    expect(state.cache_low_streak).toBe(3);
+
+    // 4th low step shouldn't re-emit; streak keeps climbing.
+    await driver.stepOnce(state);
+    expect(events.filter((e) => (e as { type: string }).type === "cache_warning")).toHaveLength(1);
+    expect(state.cache_low_streak).toBe(4);
+
+    // A high-rate step resets the streak.
+    const highCacheUsage = { ...emptyUsage(), input_tokens: 10, cache_read_input_tokens: 990 };
+    // Rebuild driver so runStep returns the high-rate result.
+    const driver2 = new LoopDriver(dir, paths, cfg, bus, {
+      runStep: async () => mkResult({ usage: highCacheUsage, session_id: asSessionId("s1") }),
+      headSha: async () => asSha("b"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("b"), subject: "s" }),
+    });
+    await driver2.stepOnce(state);
+    expect(state.cache_low_streak).toBe(0);
+  });
+
+  test("max_steps_per_session resets session_id after the cap", async () => {
+    cfg.claude.max_steps_per_session = 2;
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({ session_id: asSessionId("alive") }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.session_id).toBe(asSessionId("alive"));
+    expect(state.steps_since_session_reset).toBe(1);
+    await driver.stepOnce(state);
+    // 2nd step hit the cap → session cleared, counter reset.
+    expect(state.session_id).toBeNull();
+    expect(state.steps_since_session_reset).toBe(0);
+  });
+
+  test("max_steps_per_session=0 disables the cap", async () => {
+    cfg.claude.max_steps_per_session = 0;
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({ session_id: asSessionId("alive") }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    for (let i = 0; i < 5; i++) await driver.stepOnce(state);
+    expect(state.session_id).toBe(asSessionId("alive"));
+    expect(state.steps_since_session_reset).toBe(5);
+  });
+
+  test("step with zero token usage does not move cache streak", async () => {
+    const paths = runtimePaths(dir);
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult(),
+      headSha: async () => asSha("x"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("x"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.cache_low_streak).toBe(0);
+  });
+
+  test("successful step clears last_failure", async () => {
+    const paths = runtimePaths(dir);
+    let nthCall = 0;
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => {
+        nthCall += 1;
+        return nthCall === 1
+          ? mkResult({ subtype: "error_during_execution", errors: ["boom"] })
+          : mkResult({ session_id: asSessionId("s2") });
+      },
+      headSha: async () => asSha("abc"),
+      headDiffHash: async () => "hash",
+      autoCommit: async () => ({ committed: true, sha: asSha("abc"), subject: "subj" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.last_failure).not.toBeNull();
+    await driver.stepOnce(state);
+    expect(state.last_failure).toBeNull();
   });
 });
