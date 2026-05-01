@@ -47,18 +47,26 @@ export interface UsageClientOptions {
   fetchImpl?: typeof fetch;
   /** Test seam: read-only injection of the cache. */
   now?: () => number;
+  /** Per-request timeout in ms. Caps stalls when the usage endpoint
+   *  hangs — overnight, every cache miss calls refresh() and a hung
+   *  endpoint would block the orchestrator's main loop. Default 10s. */
+  timeoutMs?: number;
 }
+
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 export class UsageClient {
   private cache: UsageSnapshot | null = null;
   private readonly ttlMs: number;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
+  private readonly timeoutMs: number;
 
   constructor(private readonly options: UsageClientOptions) {
     this.ttlMs = options.ttlMs ?? DEFAULT_CACHE_TTL_MS;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? Date.now;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   /** Returns the cached snapshot if still fresh, else fetches. */
@@ -80,13 +88,14 @@ export class UsageClient {
           "anthropic-beta": BETA,
           Accept: "application/json",
         },
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (err) {
-      return {
-        kind: "network_error",
-        error: (err as Error).message,
-        lastGood: this.cache,
-      };
+      const e = err as Error;
+      const error = e.name === "TimeoutError" || e.name === "AbortError"
+        ? `timeout after ${this.timeoutMs}ms`
+        : e.message;
+      return { kind: "network_error", error, lastGood: this.cache };
     }
 
     if (res.status === 429) {

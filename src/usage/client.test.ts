@@ -33,12 +33,13 @@ describe("parseUsageBody", () => {
 });
 
 describe("UsageClient.get", () => {
-  function mkClient(opts: { fetchImpl: typeof fetch; now: () => number; ttlMs?: number }) {
+  function mkClient(opts: { fetchImpl: typeof fetch; now: () => number; ttlMs?: number; timeoutMs?: number }) {
     return new UsageClient({
       token: "t",
       fetchImpl: opts.fetchImpl,
       now: opts.now,
       ttlMs: opts.ttlMs,
+      timeoutMs: opts.timeoutMs,
     });
   }
 
@@ -121,6 +122,29 @@ describe("UsageClient.get", () => {
     const c = mkClient({ fetchImpl, now: () => 0 });
     const r = await c.get();
     expect(r.kind).toBe("shape_mismatch");
+  });
+
+  test("hung endpoint is bounded by timeoutMs", async () => {
+    // fetch resolves only when its caller's signal aborts.
+    const fetchImpl = ((url: string, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        const sig = init?.signal;
+        if (!sig) return;
+        sig.addEventListener("abort", () => {
+          const err = new Error(`aborted ${url}`);
+          err.name = "TimeoutError";
+          reject(err);
+        });
+      })) as unknown as typeof fetch;
+    const start = Date.now();
+    const c = mkClient({ fetchImpl, now: () => 0, timeoutMs: 50 });
+    const r = await c.get();
+    const elapsed = Date.now() - start;
+    expect(r.kind).toBe("network_error");
+    if (r.kind === "network_error") {
+      expect(r.error).toContain("timeout after 50ms");
+    }
+    expect(elapsed).toBeLessThan(500);
   });
 
   test("cache hit avoids second fetch", async () => {
