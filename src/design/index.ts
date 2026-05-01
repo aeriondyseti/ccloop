@@ -38,3 +38,13 @@ export {
   getPhasePrompt,
   buildDesignPrompt,
 } from "./prompts.ts";
+
+// Draft management
+export {
+  initializeDraft,
+  loadDraft,
+  loadDraftIfExists,
+  validateDraft,
+  promoteDraft,
+  saveDraft,
+} from "./draft.ts";
