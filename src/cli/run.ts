@@ -24,7 +24,12 @@ import { EMPTY_VIEW } from "../tui/types.ts";
 import type { TuiViewModel } from "../tui/types.ts";
 import type { CcloopState } from "../state/state.ts";
 import { findLastGreenSha, loadRecentSteps } from "../state/stepLoader.ts";
-import { decideEscalationKey, resetForContinue } from "../loop/escalation.ts";
+import { EventLogger, loadRecentEvents } from "../state/events.ts";
+import { buildRecap } from "./recap.ts";
+import { parseChecklist } from "../spec/checklist.ts";
+import { readFile } from "node:fs/promises";
+import { VERSION } from "../build-info.ts";
+import { clearSessionForReorientation, decideEscalationKey, resetForContinue } from "../loop/escalation.ts";
 import { hardReset } from "../loop/git.ts";
 import { writeState } from "../state/state.ts";
 import { spawnSync } from "node:child_process";
@@ -44,6 +49,11 @@ export async function runRun(argv: string[]): Promise<number> {
     process.stderr.write(`ccloop run: ${(err as Error).message}\n`);
     return 1;
   }
+
+  // Honor --no-color via the standard env var. Ink (and any other
+  // chalk-aware writer) reads NO_COLOR at render time. Set it early
+  // so the first render in non-TTY echo path is also plain.
+  if (flags.noColor) process.env.NO_COLOR = "1";
 
   const cwd = process.cwd();
 
@@ -160,6 +170,27 @@ export async function runRun(argv: string[]): Promise<number> {
   const driver = new LoopDriver(cwd, paths, config, bus);
   const state = await driver.loadOrInitState();
 
+  // §11.5 instance_start. Persist as soon as state is loaded so
+  // events.jsonl carries one entry per process lifetime — lets
+  // post-mortem tools count "this run had N instances" and
+  // distinguish a single 8h session from 8 × 1h resumes.
+  const lifecycleEvents = new EventLogger(paths.events);
+  let instanceStartEmitted = false;
+  try {
+    const headSha = await import("../loop/git.ts").then((m) => m.headSha(cwd));
+    await lifecycleEvents.append({
+      run_id: state.run_id,
+      step: state.current_step,
+      type: "instance_start",
+      ccloop_version: VERSION,
+      cwd,
+      git_sha: String(headSha),
+    });
+    instanceStartEmitted = true;
+  } catch {
+    // Don't let event-log issues block startup.
+  }
+
   if (needsRecoveryCommit) {
     try {
       const r = await autoCommit(
@@ -170,6 +201,22 @@ export async function runRun(argv: string[]): Promise<number> {
         process.stderr.write(
           `ccloop: recovered dirty tree into commit ${r.sha.slice(0, 7)}.\n`,
         );
+        // Persist a durable marker. Pairs with the prior-crash
+        // detection in the recap: an unpaired instance_start tells
+        // us "prior process died"; this event tells us "and the
+        // prior process had unsaved work we picked up into commit
+        // X." Best-effort — log issues must not block resume.
+        try {
+          await lifecycleEvents.append({
+            run_id: state.run_id,
+            step: state.current_step,
+            type: "recovery_commit",
+            commit_sha: String(r.sha),
+            commit_subject: r.subject,
+          });
+        } catch {
+          // Non-fatal: recovery committed; event-log write failed.
+        }
       }
     } catch (err) {
       process.stderr.write(`ccloop: recovery commit failed: ${(err as Error).message}\n`);
@@ -209,19 +256,67 @@ export async function runRun(argv: string[]): Promise<number> {
   // ESCALATED screen is up but the menu keys aren't wired" being the
   // most visible). Single source of truth — current `state` — and a
   // single render path eliminates the class entirely.
-  let logBuffer: string[] = [];
+  // Prefill the log pane from events.jsonl so `--continue` doesn't
+  // open to a blank screen; the operator can see what happened in the
+  // prior session(s) before the next step fires. Bus events appended
+  // live take over from there.
+  //
+  // Parallelize the three startup reads — events.jsonl, recent step
+  // records, SPEC.md checklist — they're independent and the recap
+  // path needs all three. Saves measurable ms on resume; also dedupes
+  // the SPEC.md read that previously happened twice (once for recap,
+  // once for the dashboard's cached count).
+  const [priorEvents, priorStepsForRecap, initialChecklist] = await Promise.all([
+    loadRecentEvents(paths.events, LOG_CAP),
+    isResume
+      ? loadRecentSteps(paths.steps, RECENT_STEPS_CAP)
+      : Promise.resolve<import("../loop/stepRecord.ts").StepRecord[]>([]),
+    readChecklist(join(cwd, SPEC_FILENAME)),
+  ]);
+  let logBuffer: string[] = priorEvents
+    .map((e) => eventToLine(e as { ts: string; type: string } & Record<string, unknown>))
+    .filter((s) => s.length > 0);
+
+  // Wake-up recap: when resuming, print a one-screen overnight summary
+  // to stderr before the alt-screen takes over. Lands in scrollback once
+  // ccloop exits, so the operator can see what happened without
+  // round-tripping to events.jsonl.
+  if (isResume) {
+    const recap = buildRecap({
+      steps: priorStepsForRecap, events: priorEvents,
+      now: new Date(), checklist: initialChecklist,
+    });
+    if (recap) process.stderr.write(recap);
+  }
   let nowBuffer: import("../tui/types.ts").TurnEvent[] = [];
   let heartbeat: "●" | "○" = "●";
   let lastHeartbeatToggleMs = Date.now();
   let finalCommitSha = "";
   let cachedRecent: import("../loop/stepRecord.ts").StepRecord[] = [];
   let stepsDirty = true;
+  // Refreshed on step_end so the dashboard reflects whatever Claude
+  // just ticked off without polling SPEC.md every tick. Initialised
+  // from the parallel read above — no second SPEC.md read.
+  let cachedChecklist: { done: number; total: number } = initialChecklist;
+  let checklistDirty = false;
   let interrupting = false;
   let firstInterruptAt = 0;
   let cadenceWait: { startedAt: string; totalMs: number } | null = null;
+  // Detached overnight runs (`nohup` or stdout redirect) hit non-TTY.
+  // The TUI is a no-op there — see the alt-screen / Ink gates below
+  // — so we instead echo each durable event line to stderr so the
+  // log file has some signal beyond the startup recap. events.jsonl
+  // remains the canonical structured surface.
+  const stdoutIsTty = Boolean(process.stdout.isTTY);
   bus.subscribe((e) => {
     if (e.type === "stream_chunk") {
-      nowBuffer = [...nowBuffer, e.turn];
+      // Mutable push: was `[...nowBuffer, e.turn]` which is O(n²)
+      // across the lifetime of a step. A heavy step can emit
+      // thousands of chunks; the spread re-allocated and copied the
+      // whole buffer on each one. Dashboard isn't memoized — it
+      // re-renders from `view` identity on every tick, not from
+      // nowContent identity — so in-place push is safe.
+      nowBuffer.push(e.turn);
       return;
     }
     if (e.type === "cadence_wait_enter") {
@@ -236,8 +331,11 @@ export async function runRun(argv: string[]): Promise<number> {
       nowBuffer = [];
     }
     const line = eventToLine(e);
-    if (line) logBuffer = [...logBuffer, line].slice(-LOG_CAP);
-    if (e.type === "step_end") stepsDirty = true;
+    if (line) {
+      logBuffer = [...logBuffer, line].slice(-LOG_CAP);
+      if (!stdoutIsTty) process.stderr.write(line + "\n");
+    }
+    if (e.type === "step_end") { stepsDirty = true; checklistDirty = true; }
     if (e.type === "done" && "final_commit_sha" in e) {
       finalCommitSha = String(e.final_commit_sha);
     }
@@ -251,7 +349,7 @@ export async function runRun(argv: string[]): Promise<number> {
     if (interrupting && now - firstInterruptAt < FORCE_EXIT_WINDOW_MS) {
       // Second press within the grace window — give up on graceful
       // shutdown. Restore terminal and bail.
-      ink.unmount();
+      ink?.unmount();
       leaveAltScreen();
       process.exit(130);
     }
@@ -261,55 +359,68 @@ export async function runRun(argv: string[]): Promise<number> {
   };
 
   let view: TuiViewModel = { ...EMPTY_VIEW, cwd, runId: state.run_id, step: state.current_step };
+  // Detached overnight runs (`nohup ccloop run > log.txt 2>&1 &` or
+  // CI) hit a non-TTY stdout. Skip the entire TUI in that mode —
+  // Ink would otherwise repaint the dashboard frame to the log file
+  // 4× per second. events.jsonl + the wake-up recap are the durable
+  // surfaces in non-TTY; escalation/guardrail-trip auto-quit since
+  // there's no way to read menu keys without raw mode.
+  const enterAltScreen = (): void => {
+    if (stdoutIsTty) process.stdout.write("\x1b[?1049h\x1b[?25l");
+  };
+  const leaveAltScreen = (): void => {
+    if (stdoutIsTty) process.stdout.write("\x1b[?25h\x1b[?1049l");
+  };
+  enterAltScreen();
+  process.on("exit", leaveAltScreen);
+
+  const ink = stdoutIsTty
+    ? render(React.createElement(Dashboard, { view, onInterrupt }), {
+        exitOnCtrlC: false,
+      })
+    : null;
   const renderNow = (): void => {
+    if (!ink) return;
     view = buildView(
       state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
       cachedRecent, finalCommitSha,
-      undefined, interrupting, cadenceWait,
+      undefined, interrupting, cadenceWait, cachedChecklist,
     );
     ink.rerender(React.createElement(Dashboard, {
       view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
     }));
   };
-  // Alt-screen: claim the whole terminal for the dashboard. Frame
-  // history doesn't pollute scrollback, and scroll-wheel input has
-  // nothing to scroll in the alt buffer (terminals translate wheel
-  // events to arrow keys there, which our scroll panes handle).
-  // Registered on `exit` so abnormal shutdowns still restore the
-  // user's terminal.
-  const enterAltScreen = (): void => {
-    process.stdout.write("\x1b[?1049h\x1b[?25l");
-  };
-  const leaveAltScreen = (): void => {
-    process.stdout.write("\x1b[?25h\x1b[?1049l");
-  };
-  enterAltScreen();
-  process.on("exit", leaveAltScreen);
-
-  const ink = render(React.createElement(Dashboard, { view, onInterrupt }), {
-    exitOnCtrlC: false,
-  });
   if (usageClient) void usageClient.get();
   const usagePollTimer = usageClient
     ? setInterval(() => { void usageClient.get(); }, 30_000)
     : null;
-  const tickTimer = setInterval(async () => {
-    if (stepsDirty) {
-      cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
-      stepsDirty = false;
-    }
-    const now = Date.now();
-    if (now - lastHeartbeatToggleMs >= HEARTBEAT_INTERVAL_MS) {
-      heartbeat = heartbeat === "●" ? "○" : "●";
-      lastHeartbeatToggleMs = now;
-    }
-    renderNow();
-  }, TUI_TICK_MS);
+  const tickTimer = stdoutIsTty
+    ? setInterval(async () => {
+        if (stepsDirty) {
+          cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
+          stepsDirty = false;
+        }
+        if (checklistDirty) {
+          cachedChecklist = await readChecklist(join(cwd, SPEC_FILENAME));
+          checklistDirty = false;
+        }
+        const now = Date.now();
+        if (now - lastHeartbeatToggleMs >= HEARTBEAT_INTERVAL_MS) {
+          heartbeat = heartbeat === "●" ? "○" : "●";
+          lastHeartbeatToggleMs = now;
+        }
+        renderNow();
+      }, TUI_TICK_MS)
+    : null;
 
   const readMenuKey = (
     allowed: ReadonlyArray<MenuKey>,
     abortSignal: AbortSignal,
   ): Promise<MenuKey> => {
+    // Non-TTY can't read menu keys (no raw mode). Auto-quit so the
+    // run terminates cleanly with the relevant exit code; the
+    // operator resumes via `--continue` after addressing the cause.
+    if (!ink) return Promise.resolve<MenuKey>("q");
     return new Promise<MenuKey>((resolve) => {
       let settled = false;
       const finish = (k: MenuKey) => {
@@ -343,6 +454,7 @@ export async function runRun(argv: string[]): Promise<number> {
         config, paths, driver, bus, abortSignal: aborter.signal,
         usage: usageClient,
         notifyOptions: { pushUrl: config.notify.push_url, webhookUrl: config.notify.webhook_url },
+        heartbeatUrl: config.notify.heartbeat_url,
       });
       if (outcome.kind === "done") { exitCode = 0; resolved = true; }
       else if (outcome.kind === "guardrail_trip") {
@@ -356,6 +468,20 @@ export async function runRun(argv: string[]): Promise<number> {
       }
       else if (outcome.kind === "escalated") {
         const action = await handleEscalation(state, paths, cwd, aborter.signal, readMenuKey);
+        // Audit trail: record what the operator did at the menu so a
+        // post-mortem (or the wake-up recap) can answer "what
+        // recovery action did I take at 2am?" without inferring from
+        // git log + state diffs. Best-effort.
+        try {
+          await lifecycleEvents.append({
+            run_id: state.run_id,
+            step: state.current_step,
+            type: "escalation_resolved",
+            action,
+          });
+        } catch {
+          // Non-fatal.
+        }
         if (action === "quit") { exitCode = 5; resolved = true; }
         // continue / revert / edit_spec → loop again with reset state
       }
@@ -364,19 +490,63 @@ export async function runRun(argv: string[]): Promise<number> {
     process.stderr.write(`\nccloop: fatal error: ${(err as Error).message}\n`);
     exitCode = 1;
   } finally {
-    clearInterval(tickTimer);
+    if (tickTimer) clearInterval(tickTimer);
     if (usagePollTimer) clearInterval(usagePollTimer);
-    cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
-    menuKeyHandler = null; // suppress key wiring on the final paint
-    renderNow();
-    ink.unmount();
+    if (ink) {
+      cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
+      menuKeyHandler = null; // suppress key wiring on the final paint
+      renderNow();
+      ink.unmount();
+    }
     leaveAltScreen();
     process.off("exit", leaveAltScreen);
     process.off("SIGINT", onSigInt);
     process.off("SIGTERM", onSigTerm);
     if (release) await release();
+    // §11.5 instance_exit. Best-effort — don't let log-write
+    // failures change the exit code that the user actually cares
+    // about. The reason field is the dominant outcome from runLoop;
+    // a fatal error path that didn't go through runLoop falls back
+    // to "fatal_error".
+    if (instanceStartEmitted) {
+      try {
+        await lifecycleEvents.append({
+          run_id: state.run_id,
+          step: state.current_step,
+          type: "instance_exit",
+          reason: exitReasonFromCode(exitCode),
+          exit_code: exitCode,
+        });
+      } catch {
+        // Best-effort.
+      }
+    }
   }
   return exitCode;
+}
+
+function exitReasonFromCode(code: number): string {
+  // Mirror the SPEC §12.6 / §0 exit-code table in human-readable form.
+  switch (code) {
+    case 0: return "done";
+    case 1: return "fatal_error";
+    case 2: return "auth_missing";
+    case 3: return "lock_held";
+    case 4: return "guardrail_trip";
+    case 5: return "escalated";
+    case 130: return "sigint";
+    case 143: return "sigterm";
+    default: return `exit_${code}`;
+  }
+}
+
+async function readChecklist(specPath: string): Promise<{ done: number; total: number }> {
+  try {
+    const text = await readFile(specPath, "utf8");
+    return parseChecklist(text);
+  } catch {
+    return { done: 0, total: 0 };
+  }
 }
 
 async function isCwdGreenfield(cwd: string): Promise<boolean> {
@@ -426,6 +596,33 @@ function eventToLine(e: { ts: string; type: string } & Record<string, unknown>):
       return `${t}  guardrail: ${String(e.which ?? "")} = ${String(e.actual ?? "")}`;
     case "usage_degraded":
       return `${t}  usage degraded: ${String(e.reason ?? "")}`;
+    case "cache_warning": {
+      const rate = (numberOr(e.rate, 0) * 100).toFixed(0);
+      return `${t}  cache hit rate ${rate}% for ${numberOr(e.streak, 0)} steps in a row`;
+    }
+    case "notification_sent": {
+      const channel = String(e.channel ?? "?");
+      const ok = e.ok === true;
+      const status = e.status === null || e.status === undefined ? "—" : String(e.status);
+      const detail = ok ? `ok (${status})` : `failed (${e.error ?? status})`;
+      return `${t}  notify ${channel}: ${detail}`;
+    }
+    case "instance_start": {
+      const v = e.ccloop_version ? `v${e.ccloop_version}` : "";
+      const sha = String(e.git_sha ?? "").slice(0, 7);
+      const tail = [v, sha ? `@${sha}` : ""].filter(Boolean).join(" ");
+      return `${t}  instance start${tail ? ` · ${tail}` : ""}`;
+    }
+    case "instance_exit":
+      return `${t}  instance exit · ${String(e.reason ?? "?")} (exit ${e.exit_code ?? "?"})`;
+    case "recovery_commit": {
+      const sha = String(e.commit_sha ?? "").slice(0, 7);
+      const subj = String(e.commit_subject ?? "").trim();
+      const tail = subj ? ` · ${subj}` : "";
+      return `${t}  recovery commit ${sha}${tail}`;
+    }
+    case "escalation_resolved":
+      return `${t}  escalation resolved · ${String(e.action ?? "?")}`;
     case "done":
       return `${t}  done · ${String(e.final_commit_sha ?? "").slice(0, 7)}`;
     default:
@@ -445,6 +642,8 @@ function formatDurationShort(ms: number): string {
   return `${m}m${String(r).padStart(2, "0")}s`;
 }
 
+type EscalationOutcome = "continue" | "revert" | "edit_spec" | "quit";
+
 async function handleEscalation(
   state: CcloopState,
   paths: ReturnType<typeof runtimePaths>,
@@ -454,7 +653,7 @@ async function handleEscalation(
     allowed: ReadonlyArray<MenuKey>,
     abortSignal: AbortSignal,
   ) => Promise<MenuKey>,
-): Promise<"continue" | "quit"> {
+): Promise<EscalationOutcome> {
   const key = await readMenuKey(["c", "r", "e", "q"], abortSignal);
   if (abortSignal.aborted) return "quit";
   const lastGreen = await findLastGreenSha(paths.steps);
@@ -474,8 +673,9 @@ async function handleEscalation(
         return "quit";
       }
       resetForContinue(state);
+      clearSessionForReorientation(state);
       await writeState(paths.state, state);
-      return "continue";
+      return "revert";
     case "edit_spec": {
       const editor = process.env.EDITOR || process.env.VISUAL || "vi";
       const r = spawnSync(editor, [join(cwd, SPEC_FILENAME)], { stdio: "inherit" });
@@ -484,8 +684,9 @@ async function handleEscalation(
         return "quit";
       }
       resetForContinue(state);
+      clearSessionForReorientation(state);
       await writeState(paths.state, state);
-      return "continue";
+      return "edit_spec";
     }
   }
 }
@@ -528,6 +729,7 @@ function buildView(
   focus: import("../tui/types.ts").FocusTarget = "now",
   interrupting = false,
   cadenceWait: { startedAt: string; totalMs: number } | null = null,
+  checklist: { done: number; total: number } | null = null,
 ): TuiViewModel {
   const snapshot = usage?.lastSnapshot() ?? null;
   return project({
@@ -541,6 +743,7 @@ function buildView(
     heartbeat,
     interrupting,
     cadenceWait,
+    checklist,
     now: new Date(),
     finalCommitSha,
   });

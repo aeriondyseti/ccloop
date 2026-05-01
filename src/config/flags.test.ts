@@ -10,13 +10,17 @@ describe("parseRunFlags", () => {
     const f = parseRunFlags([
       "--continue", "-y", "--yolo", "--max-steps", "42",
       "--cadence", "30", "--max-wall-clock", "1h",
-      "--prompt", "p.md", "--log-level", "debug", "--no-color",
+      "--prompt", "p.md", "--no-color",
     ]);
     expect(f).toEqual({
       cont: true, yes: true, yolo: true,
       maxSteps: 42, cadence: 30, maxWallClock: "1h",
-      promptPath: "p.md", logLevel: "debug", noColor: true,
+      promptPath: "p.md", noColor: true,
     });
+  });
+
+  test("removed --log-level flag is rejected as unknown", () => {
+    expect(() => parseRunFlags(["--log-level", "info"])).toThrow(FlagError);
   });
 
   test("unknown flag errors", () => {

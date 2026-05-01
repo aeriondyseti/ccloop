@@ -16,8 +16,7 @@ Common flags for \`ccloop run\`:
   --cadence N             seconds between step starts
   --yolo                  bypass tool permission scoping
   --prompt PATH           override prompt template
-  --log-level LEVEL       debug | info | warn | error
-  --no-color              disable ANSI
+  --no-color              disable ANSI colors in the dashboard
 
 Authentication (one of):
   CLAUDE_CODE_OAUTH_TOKEN  long-lived; generate with: claude setup-token
