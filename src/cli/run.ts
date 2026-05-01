@@ -34,7 +34,7 @@ import { hardReset } from "../loop/git.ts";
 import { writeState } from "../state/state.ts";
 import { spawnSync } from "node:child_process";
 
-const TUI_TICK_MS = 1000;
+const TUI_TICK_MS = 16;
 const HEARTBEAT_INTERVAL_MS = 1000;
 const LOG_CAP = 500;
 const RECENT_STEPS_CAP = 200;

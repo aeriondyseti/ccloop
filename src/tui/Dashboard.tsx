@@ -176,14 +176,14 @@ function TurnEventRow({ event }: { event: TurnEvent }): React.ReactElement {
   }
 }
 
-// EXPERIMENT: ink-scroll-view swapped for a plain Box tail-slice to
-// isolate flicker source. No scroll hooks → no extra renders from
-// useAutoTail/useScrollKeys; no ScrollView reconciliation. Pane height
-// fits 8 rows of content (10 minus title + border).
-const LOG_VISIBLE_ROWS = 8;
 function LogPane({ view, focus }: FocusableProps): React.ReactElement {
+  const ref = useRef<ScrollViewRef>(null);
+  const userScrolledRef = useRef(false);
   const focused = focus === "log";
-  const titleRight = focused ? "(scroll disabled — experiment)" : "tab to focus";
+  useAutoTail(view.logContent.length, userScrolledRef, ref);
+  useScrollKeys({ focused, userScrolledRef, scrollRef: ref });
+
+  const titleRight = focused ? "↑↓ ⇞⇟ g/G" : "tab to focus";
 
   if (view.logContent.length === 0) {
     return (
@@ -193,15 +193,14 @@ function LogPane({ view, focus }: FocusableProps): React.ReactElement {
       </Pane>
     );
   }
-  const tail = view.logContent.slice(-LOG_VISIBLE_ROWS);
   return (
     <Pane title="log" role="focusable" focused={focused}
           titleRight={titleRight} height={10}>
-      <Box flexDirection="column">
-        {tail.map((e, i) => (
+      <ScrollView ref={ref}>
+        {view.logContent.map((e, i) => (
           <Text key={`${i}-${e}`} dimColor>{e}</Text>
         ))}
-      </Box>
+      </ScrollView>
     </Pane>
   );
 }
