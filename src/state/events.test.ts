@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EventLogger } from "./events.ts";
+import { EventLogger, loadRecentEvents } from "./events.ts";
 import { asIsoTimestamp, asRunId } from "../branded.ts";
 
 describe("EventLogger", () => {
@@ -28,6 +28,26 @@ describe("EventLogger", () => {
     expect(a.type).toBe("step_start");
     expect(b.type).toBe("step_end");
     expect(a.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  test("loadRecentEvents returns last N entries, skips malformed, missing → []", async () => {
+    const path = join(dir, "events.jsonl");
+    const log = new EventLogger(path);
+    for (let i = 0; i < 5; i++) {
+      await log.append({ run_id: asRunId("r"), step: i, type: "step_start" });
+    }
+    // Inject a malformed line and a trailing newline.
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(path, "not-json\n", "utf8");
+    await log.append({ run_id: asRunId("r"), step: 99, type: "step_end" });
+
+    const recent = await loadRecentEvents(path, 3);
+    expect(recent.length).toBe(3);
+    expect(recent.at(-1)?.type).toBe("step_end");
+    expect(recent.every((e) => typeof e.type === "string")).toBe(true);
+
+    const empty = await loadRecentEvents(join(dir, "missing.jsonl"), 10);
+    expect(empty).toEqual([]);
   });
 
   test("preserves a caller-supplied ts", async () => {
