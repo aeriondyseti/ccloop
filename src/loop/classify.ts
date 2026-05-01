@@ -4,9 +4,14 @@
  */
 import type { StepResult } from "../sdk/types.ts";
 
+export interface StepFailure {
+  category: FailureCategory;
+  excerpt: string;
+}
+
 export type StepClassification =
   | { outcome: "success" }
-  | { outcome: "failure"; category: FailureCategory; excerpt: string };
+  | ({ outcome: "failure" } & StepFailure);
 
 export type FailureCategory =
   | "sdk"
@@ -16,6 +21,8 @@ export type FailureCategory =
   | "max_budget"
   | "sdk_init"
   | "commit"
+  | "gate"
+  | "step_timeout"
   | "loop_detected";
 
 export function classifyStep(r: StepResult): StepClassification {
