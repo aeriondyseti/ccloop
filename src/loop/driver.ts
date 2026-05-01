@@ -291,6 +291,7 @@ export class LoopDriver {
         resumeSessionId: state.session_id,
         abortController: ac,
         preToolUseHook: approver,
+        step: state.current_step,
         onMessage: (msg) => {
           const ts = isoFromDate(this.deps.now());
           for (const turn of parser.consume(msg, ts)) {

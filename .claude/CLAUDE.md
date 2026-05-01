@@ -29,12 +29,12 @@ This repo has THREE files named `SPEC.md` in different roles:
 - **`templates/SPEC.md`** — *an example/starter spec for users of
   ccloop*. Shipped as a scaffold for `ccloop init` to copy. NOT a
   spec for ccloop itself.
-- **`./SPEC.md`** (repo root) — *a dogfood-mode spec*. Present when
-  the user is running ccloop **on this repo** to build a new ccloop
-  feature. It describes the feature being built right now (e.g.,
-  the design loop), not ccloop as a whole. Treat it the same way
-  ccloop normally treats `./SPEC.md` in any target project: it is
-  the build target for the current run.
+- **`./SPEC.md`** (repo root) — *a build target spec*. May be created
+  by `ccloop design` or when running ccloop on this repo in dogfood
+  mode to build new ccloop features. Describes what needs to be
+  built, not ccloop's contract. Treat it the same way ccloop normally
+  treats `./SPEC.md` in any target project: it is the build target
+  for the current run.
 
 When `.claude/SPEC.md` says "the spec," it means whatever
 `./SPEC.md` is in the project ccloop is being run against. Inside

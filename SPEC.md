@@ -74,7 +74,7 @@ Pinned terms used by this spec:
       in the loop. If it passes, prompt the user one more time
       ("promote draft to ./SPEC.md?"); on confirm, copy draft +
       sibling artifacts, then offer to launch `ccloop build`.
-- [ ] **Resume model.** On re-invocation, if `./.ccloop/design/spec.draft.md`
+- [x] **Resume model.** On re-invocation, if `./.ccloop/design/spec.draft.md`
       exists, load it as the starting state. Conversation history is
       **not** restored — each invocation is a fresh SDK session.
       Agent system prompt includes the current draft as context.

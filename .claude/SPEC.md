@@ -1632,6 +1632,69 @@ ccloop does not "self-heal" — if the user broke it, fix or delete.
 
 ---
 
+## 13c. Design Loop
+
+The design loop (`ccloop design`) is an interactive mode that produces
+a validated `SPEC.md` for the build loop to consume. Unlike the build
+loop's autonomous execution, the design loop is human-in-the-loop:
+the agent guides the user through a structured design process.
+
+**Implementation location**: `src/design/`
+
+**Key modules**:
+- `types.ts` — core types (DesignPhase, DesignSessionState, events)
+- `constants.ts` — phase order, default config, artifact paths
+- `prompts.ts` — system prompt + per-phase scaffolding
+- `draft.ts` — draft initialization, validation (reuses `validateSpec`), promotion
+- `session.ts` — metadata persistence for resume
+- `events.ts` — lifecycle events to `.ccloop/events.jsonl`
+- `approver.ts` — PreToolUse hook restricting writes to `.ccloop/design/`
+- `acceptance.ts` — validation gate logic when user signals accept
+
+**Design artifacts** (all under `./.ccloop/design/`):
+- `spec.draft.md` — in-progress spec
+- `ROADMAP.md` — future scope (optional, promoted if exists)
+- `IDEAS.md` — idea parking lot (optional, promoted if exists)
+- `TECH-DEBT.md` — intentional shortcuts (optional, promoted if exists)
+- `session.json` — resume metadata (phase, turn count, cost)
+- `last-session.md` — graceful-shutdown summary (Ctrl+C)
+
+**Phase flow** (linear in MVP):
+1. Vision → 2. Users → 3. Scope → 4. Architecture → 5. Milestones → 6. Acceptance
+
+**Agent tools** (sandbox-restricted via `makeDesignApprover`):
+- Read/Grep/Glob (read-only, anywhere in CWD)
+- Edit/Write (path-restricted to `.ccloop/design/` only)
+- Bash (sandboxed via bwrap/sandbox-exec, same as build loop)
+- WebSearch/WebFetch
+- `ask_user` MCP tool (in-process server, multiple-choice prompts)
+
+**Resume model**: On re-invocation, if `spec.draft.md` exists, load it
+as starting state. Conversation history is **not** restored (fresh SDK
+session each time); the draft itself provides continuity.
+
+**Acceptance flow**: When user signals accept (via `ask_user` or future
+slash command), run `validateSpec` on draft. If validation fails,
+surface errors and stay in loop. If validation passes, prompt user to
+confirm promotion. On confirm, copy draft + sibling artifacts to
+project root, offer to launch `ccloop build`.
+
+**Configuration**: `ccloop.toml` `[design]` section. Keys: `model`
+(defaults to Opus, independent of `[build].model`), `max_turns`
+(default 100), `effort` (default "high"), `enable_tui` (default true).
+
+**Event emission**: Design sessions emit to the same `events.jsonl` as
+the build loop. Event types: `design_session_start`,
+`design_phase_enter`, `ask_user_asked`, `ask_user_answered`,
+`draft_edit`, `design_session_accept`, `design_session_abort`,
+`design_session_end`.
+
+**No global state**: All design state lives in `.ccloop/design/`.
+Deleting that directory clears design session; deleting `.ccloop/`
+clears everything.
+
+---
+
 ## 14. Known Unknowns
 
 Items requiring empirical validation during build, not assumption.

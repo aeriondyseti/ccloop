@@ -1,4 +1,5 @@
 import { query as defaultQuery, type HookCallback } from "@anthropic-ai/claude-agent-sdk";
+import { openSdkDebugSink } from "./debugDump.ts";
 
 type QueryImpl = typeof defaultQuery;
 
@@ -26,6 +27,10 @@ export interface RunStepInput {
   preToolUseHook?: HookCallback;
   /** Test seam — defaults to the SDK's `query`. */
   queryImpl?: QueryImpl;
+  /** Step number, used to label SDK debug dumps when
+   *  `CCLOOP_SDK_DEBUG=1`. Optional — dumps still work without it
+   *  (they fall back to a timestamp-based dir). */
+  step?: number;
 }
 
 /**
@@ -56,6 +61,7 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   let prompt = input.prompt;
   let resume = input.resumeSessionId;
   let continuations = 0;
+  const debugSink = openSdkDebugSink(input.cwd, input.step);
 
   // Outer loop = one SDK `query` call. We keep going while the SDK
   // returns `pause_turn` (it wants to continue past its own maxTurns
@@ -64,10 +70,16 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   // and cadence sleep, fragmenting Claude's work.
   while (true) {
     const sdkOptions = buildSdkOptions(input, resume);
+    debugSink?.startAttempt(continuations, {
+      prompt,
+      resumeSessionId: resume,
+      options: sdkOptions,
+    });
     const q = queryImpl({ prompt, options: sdkOptions });
 
     let lastResultUsage: Record<string, unknown> | undefined;
     for await (const msg of q) {
+      debugSink?.message(msg);
       try {
         input.onMessage?.(msg);
       } catch {
@@ -125,7 +137,7 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   const accumulated = assistantTurns.join("\n\n");
   const finalText = resultText.length > accumulated.length ? resultText : accumulated;
 
-  return {
+  const stepResult: StepResult = {
     subtype,
     stop_reason: stopReason,
     num_turns: numTurns,
@@ -136,6 +148,8 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
     final_text: finalText,
     errors,
   };
+  debugSink?.finish(stepResult);
+  return stepResult;
 }
 
 /** Map ccloop's string `effort` knob to the SDK's numeric

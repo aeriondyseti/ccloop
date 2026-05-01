@@ -25,9 +25,11 @@ export async function run(argv: string[]): Promise<number> {
       return 1;
     }
     process.env.CCLOOP_DEBUG = "1";
-    // The TUI keystroke logger uses its own env var so it can be
-    // toggled independently; --debug turns it on by default.
+    // The TUI keystroke logger and SDK debug dump use their own env
+    // vars so they can be toggled independently; --debug turns both
+    // on by default.
     process.env.CCLOOP_TUI_DEBUG ??= "1";
+    process.env.CCLOOP_SDK_DEBUG ??= "1";
   }
 
   const [first, ...rest] = consumed.argv;
