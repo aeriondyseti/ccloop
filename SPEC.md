@@ -56,7 +56,7 @@ Pinned terms used by this spec:
       auto-scrolling to the most recently edited region. Header strip
       across the top reuses shared components and shows usage / cost
       / cache hit rate. Both panes focusable (Tab cycles), scrollable.
-- [ ] **Linear phase scaffolding.** System prompt + per-phase prompt
+- [x] **Linear phase scaffolding.** System prompt + per-phase prompt
       fragments walk the agent through vision → users → scope →
       architecture → milestones → acceptance. The agent is told to
       complete each phase before advancing. No phase-hopping in MVP.

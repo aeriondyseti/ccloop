@@ -30,3 +30,11 @@ export {
   getDesignDir,
   getDesignSessionMetadataPath,
 } from "./paths.ts";
+
+// Prompts
+export {
+  DESIGN_SYSTEM_PROMPT,
+  PHASE_PROMPTS,
+  getPhasePrompt,
+  buildDesignPrompt,
+} from "./prompts.ts";
