@@ -5,6 +5,12 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Fixed
+- **`ccloop design` template path resolution in published npm
+  install.** `initializeDraft` resolved its default template path via
+  `__dirname`, which Bun polyfills in dev but is not the idiomatic
+  ESM form and resolves wrong against bundled distributions. Replaced
+  with `import.meta.dir`, matching the rest of the codebase
+  (`build-info.ts`, `init.ts`).
 - **Forward-compat for legacy `state.json` after the rotation-summary
   field landed.** `validateState` defaults all new optional fields to
   null/0 on read of pre-feature state files; `rotation_summary` was

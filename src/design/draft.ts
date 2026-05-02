@@ -39,7 +39,7 @@ export async function initializeDraft(
   await mkdir(designDir, { recursive: true });
 
   // Determine template path
-  const defaultTemplatePath = join(__dirname, "..", "..", "templates", "SPEC.md");
+  const defaultTemplatePath = join(import.meta.dir, "..", "..", "templates", "SPEC.md");
   const sourcePath = templatePath ?? defaultTemplatePath;
 
   // Copy template to draft
