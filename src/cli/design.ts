@@ -60,6 +60,7 @@ export async function runDesign(argv: string[]): Promise<number> {
   const shutdown = createShutdownSignal({ abortController });
   const interrupt = createInterruptHandler(shutdown);
   process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
 
   const wantsTui = !flags.noTui
     && config.design.enable_tui
@@ -87,6 +88,7 @@ export async function runDesign(argv: string[]): Promise<number> {
       return exitCodeFor(result.outcome);
     } finally {
       process.off("SIGINT", interrupt);
+      process.off("SIGTERM", interrupt);
       inkApp.unmount();
       await inkApp.waitUntilExit().catch(() => undefined);
     }
@@ -100,6 +102,7 @@ export async function runDesign(argv: string[]): Promise<number> {
     return exitCodeFor(result.outcome);
   } finally {
     process.off("SIGINT", interrupt);
+    process.off("SIGTERM", interrupt);
     await io.close();
   }
 }
@@ -125,7 +128,15 @@ function createInterruptHandler(shutdown: ShutdownSignal): () => void {
     if (now - firstAt <= FORCE_WINDOW_MS) {
       shutdown.forceAbort();
       process.stderr.write("\n[ccloop design] Force quit.\n");
+      return;
     }
+    // Force window elapsed: a long summary turn could outlive 2s and
+    // the user pressed Ctrl+C again to force-quit. Reset the window
+    // and re-announce so the next press still has a route out.
+    firstAt = now;
+    process.stderr.write(
+      "\n[ccloop design] Still finishing the summary turn. Press Ctrl+C again within 2s to force quit.\n",
+    );
   };
 }
 

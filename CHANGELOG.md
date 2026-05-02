@@ -5,6 +5,17 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Fixed
+- **`ccloop design` Ctrl+C dead-window and missing SIGTERM.** Two
+  related signal-handling bugs in the design CLI:
+  - A second Ctrl+C arriving more than 2 s after the first silently
+    no-op'd, leaving users stuck if a summary turn outran the
+    force-quit window. The handler now resets `firstAt` after the
+    window elapses and re-announces the prompt so the next press
+    still has a route out.
+  - SIGTERM (the standard graceful-stop signal in Docker / systemd)
+    was not handled at all; the process would hard-exit without the
+    summary write. The handler is now bound to both SIGINT and
+    SIGTERM, matching `ccloop run` / `ccloop build`.
 - **`ccloop design` template path resolution in published npm
   install.** `initializeDraft` resolved its default template path via
   `__dirname`, which Bun polyfills in dev but is not the idiomatic
