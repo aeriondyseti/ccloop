@@ -49,6 +49,14 @@ export interface ClaudeConfig {
    *  rotation. Default 0.90 leaves a 10% buffer for the next turn's
    *  output and tool results. Set to 0 (or ≥1) to disable. */
   context_rotate_threshold: number;
+  /** Optional text appended to Claude Code's default system prompt.
+   *  Use for project-level guidance the model should always carry —
+   *  tone, scope, "this is a research simulation, not malware"-type
+   *  pre-emptions for safety scaffolding that pattern-matches on
+   *  the project. Empty string leaves the default prompt untouched.
+   *  Replaces, not augments, the harness when ccloop hands off to
+   *  the SDK; the per-step task prompt is unaffected. */
+  system_prompt: string;
   /** Specific Claude model to use. Empty string uses the SDK's
    *  current default. */
   model: string;
@@ -106,6 +114,7 @@ export const DEFAULTS: CcloopConfig = {
     effort: "xhigh",
     max_steps_per_session: 30,
     context_rotate_threshold: 0.90,
+    system_prompt: "",
     model: "",
     fallback_model: "",
     step_timeout_seconds: 1800,

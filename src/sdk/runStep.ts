@@ -199,6 +199,13 @@ function buildSdkOptions(
   };
   const thinking = effortToThinkingTokens(input.config.claude.effort);
   if (thinking !== undefined) opts.maxThinkingTokens = thinking;
+  if (input.config.claude.system_prompt) {
+    opts.systemPrompt = {
+      type: "preset",
+      preset: "claude_code",
+      append: input.config.claude.system_prompt,
+    };
+  }
   if (input.config.claude.model) opts.model = input.config.claude.model;
   if (input.config.claude.fallback_model) opts.fallbackModel = input.config.claude.fallback_model;
   if (yolo) opts.allowDangerouslySkipPermissions = true;
