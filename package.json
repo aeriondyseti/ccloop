@@ -7,10 +7,14 @@
     "ccloop": "src/index.ts"
   },
   "files": [
-    "src",
+    "src/**/*",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx",
+    "!src/cli/debug.ts",
+    "!src/sdk/debugDump.ts",
     "templates",
-    "prompt-template.md",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
