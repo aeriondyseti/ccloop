@@ -75,6 +75,15 @@ export type DriverEvent =
       context_window?: number;
     })
   | (EventBase & { type: "stream_chunk"; turn: TurnEvent })
+  | (EventBase & {
+      /** Bus-only: live per-inference context-size update. Lets the
+       *  TUI advance the context bar every turn instead of only at
+       *  step_end. Carries the running peak input tokens for the
+       *  current step so the bar walks monotonically up until step
+       *  boundaries. */
+      type: "usage_tick";
+      peak_input_tokens: number;
+    })
   | (EventBase & { type: "cadence_wait_enter"; started_at: IsoTimestamp; total_ms: number })
   | (EventBase & { type: "cadence_wait_exit" });
 
@@ -139,7 +148,8 @@ export class LoopDriver {
     if (
       event.type !== "stream_chunk" &&
       event.type !== "cadence_wait_enter" &&
-      event.type !== "cadence_wait_exit"
+      event.type !== "cadence_wait_exit" &&
+      event.type !== "usage_tick"
     ) {
       await this.events.append(enriched);
     }
@@ -283,6 +293,9 @@ export class LoopDriver {
       ac.abort();
     }, stepTimeoutMs) : null;
     const parser = new StreamParser();
+    // Running peak across this step's assistant messages, updated
+    // on each one so the TUI can advance the context bar live.
+    let stepPeakInput = 0;
     const approver = makeApprover({
       yoloMode: this.config.claude.yolo_mode,
       cwd: this.cwd,
@@ -316,6 +329,30 @@ export class LoopDriver {
               type: "stream_chunk",
               turn,
             });
+          }
+          // Per-inference peak. Each assistant message reports its
+          // own usage; track the heaviest single inference and emit
+          // a usage_tick when it grows, so the TUI's context bar can
+          // walk up monotonically across turns instead of jumping
+          // only at step_end.
+          const u = (msg as { type?: string; message?: { usage?: Record<string, unknown> } });
+          if (u.type === "assistant" && u.message?.usage) {
+            const usage = u.message.usage;
+            const num = (k: string): number => {
+              const v = usage[k];
+              return typeof v === "number" && Number.isFinite(v) ? v : 0;
+            };
+            const inferenceInput =
+              num("input_tokens") + num("cache_read_input_tokens") + num("cache_creation_input_tokens");
+            if (inferenceInput > stepPeakInput) {
+              stepPeakInput = inferenceInput;
+              void this.emit({
+                run_id: state.run_id,
+                step: state.current_step,
+                type: "usage_tick",
+                peak_input_tokens: stepPeakInput,
+              });
+            }
           }
         },
       });

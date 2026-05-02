@@ -43,6 +43,11 @@ export interface ProjectorInput {
    *  (200K default, 1M when the id contains "1m"). Empty / undefined
    *  → 200K. */
   model?: string;
+  /** Running peak input-token count for the in-flight step. Set by
+   *  the CLI from `usage_tick` bus events; the projector takes the
+   *  max of this and the most recent completed step's peak so the
+   *  context bar advances live within a step. */
+  liveStepPeakTokens?: number;
   /** Operator pause flag — projects as `OPERATOR_PAUSED` when the
    *  underlying state is `running`. State.json itself is unchanged
    *  (operator pause is per-instance, not durable). */
@@ -99,7 +104,12 @@ export function project(input: ProjectorInput): TuiViewModel {
   const avgCache = cacheRateSamples > 0 ? cacheRateSum / cacheRateSamples : 0;
 
   const lastStep = input.recent[input.recent.length - 1];
-  const lastContextTokens = lastStep ? inputContextTokens(lastStep.usage) : 0;
+  const cachedPeak = lastStep ? inputContextTokens(lastStep.usage) : 0;
+  // Within a step, the live peak walks up turn by turn. At
+  // step_start it resets to 0; until the first usage_tick it stays
+  // 0, so we fall back to the last completed step's peak for the
+  // bar — better than blanking the bar on every step boundary.
+  const lastContextTokens = Math.max(cachedPeak, input.liveStepPeakTokens ?? 0);
   const contextWindowTokens = pickContextWindow(input.model);
 
   return {

@@ -25,6 +25,10 @@ export type EventType =
   /** Bus-only: live SDK stream events for the TUI. Not written to
    *  events.jsonl (would bloat the durable log). */
   | "stream_chunk"
+  /** Bus-only: per-inference peak-context update. Lets the TUI
+   *  advance its context bar every turn instead of only at
+   *  step_end. */
+  | "usage_tick"
   /** Bus-only: cadence-sleep boundaries. Lets the TUI render an
    *  "X/Y s until next step" countdown without polling. */
   | "cadence_wait_enter"

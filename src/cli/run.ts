@@ -293,6 +293,11 @@ export async function runRun(argv: string[]): Promise<number> {
     if (recap) process.stderr.write(recap);
   }
   let nowBuffer: import("../tui/types.ts").TurnEvent[] = [];
+  // Live peak input tokens for the in-flight step. Reset on
+  // step_start, walked up by usage_tick events from the driver, and
+  // passed to the projector so the context bar can advance every
+  // turn instead of only at step_end.
+  let liveStepPeakTokens = 0;
   let heartbeat: "●" | "○" = "●";
   let lastHeartbeatToggleMs = Date.now();
   let finalCommitSha = "";
@@ -333,6 +338,10 @@ export async function runRun(argv: string[]): Promise<number> {
     }
     if (e.type === "step_start") {
       nowBuffer = [];
+      liveStepPeakTokens = 0;
+    }
+    if (e.type === "usage_tick") {
+      liveStepPeakTokens = e.peak_input_tokens;
     }
     const line = eventToLine(e);
     if (line) {
@@ -432,6 +441,7 @@ export async function runRun(argv: string[]): Promise<number> {
       undefined, interrupting, cadenceWait, cachedChecklist,
       pauseGate.isPaused(),
       config.claude.model,
+      liveStepPeakTokens,
     );
     if (!force) {
       const cadenceS = view.cadenceWait
@@ -820,6 +830,7 @@ function buildView(
   checklist: { done: number; total: number } | null = null,
   operatorPaused = false,
   model = "",
+  liveStepPeakTokens = 0,
 ): TuiViewModel {
   const snapshot = usage?.lastSnapshot() ?? null;
   return project({
@@ -838,5 +849,6 @@ function buildView(
     finalCommitSha,
     operatorPaused,
     model,
+    liveStepPeakTokens,
   });
 }
