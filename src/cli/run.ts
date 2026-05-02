@@ -431,6 +431,7 @@ export async function runRun(argv: string[]): Promise<number> {
       cachedRecent, finalCommitSha,
       undefined, interrupting, cadenceWait, cachedChecklist,
       pauseGate.isPaused(),
+      config.claude.model,
     );
     if (!force) {
       const cadenceS = view.cadenceWait
@@ -700,6 +701,11 @@ function eventToLine(e: { ts: string; type: string } & Record<string, unknown>):
     }
     case "escalation_resolved":
       return `${t}  escalation resolved · ${String(e.action ?? "?")}`;
+    case "session_rotated": {
+      const prev = String(e.previous_session_id ?? "");
+      const prevTail = prev ? ` (was ${prev.slice(0, 8)})` : "";
+      return `${t}  session rotated · ${String(e.reason ?? "?")}${prevTail}`;
+    }
     case "done":
       return `${t}  done · ${String(e.final_commit_sha ?? "").slice(0, 7)}`;
     default:
@@ -808,6 +814,7 @@ function buildView(
   cadenceWait: { startedAt: string; totalMs: number } | null = null,
   checklist: { done: number; total: number } | null = null,
   operatorPaused = false,
+  model = "",
 ): TuiViewModel {
   const snapshot = usage?.lastSnapshot() ?? null;
   return project({
@@ -825,5 +832,6 @@ function buildView(
     now: new Date(),
     finalCommitSha,
     operatorPaused,
+    model,
   });
 }

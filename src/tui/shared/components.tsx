@@ -77,5 +77,9 @@ export function Pane({
 // ===== Controls: hint bar =====
 
 export function Controls({ hint }: { hint: string }): React.ReactElement {
-  return <Text dimColor>{hint}</Text>;
+  return (
+    <Box paddingX={1}>
+      <Text dimColor>{hint}</Text>
+    </Box>
+  );
 }

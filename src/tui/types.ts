@@ -60,6 +60,16 @@ export interface TuiViewModel {
    *  flag — that's the same point at which the cache_warning event
    *  fires. 0 when healthy. */
   cacheLowStreak: number;
+  /** Most recent step's input-side context size — input_tokens +
+   *  cache_read + cache_creation. Approximates the prefix that was
+   *  sent on the last assistant call; the next step starts from a
+   *  similar baseline since the SDK resumes the same session until
+   *  rotation. 0 when no step has reported usage yet. */
+  lastContextTokens: number;
+  /** Effective context window for the active model. Used as the
+   *  denominator for the context-utilization bar. Defaults to 200K
+   *  for Sonnet / Opus; 1M when the model id contains "1m". */
+  contextWindowTokens: number;
   /** Unified transcript: lifecycle events + live turn stream merged
    *  in chronological order. Replaces the old log/now split. */
   transcript: TranscriptEntry[];
@@ -100,6 +110,8 @@ export const EMPTY_VIEW: TuiViewModel = {
   rollingTokensOut: 0,
   averageCacheHitRate: 0,
   cacheLowStreak: 0,
+  lastContextTokens: 0,
+  contextWindowTokens: 200_000,
   transcript: [],
   focus: "transcript",
   heartbeat: "●",

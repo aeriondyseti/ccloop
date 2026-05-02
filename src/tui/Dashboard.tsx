@@ -326,6 +326,13 @@ function lifecycleBlock(e: LifecycleEntry): LifecycleBlock {
       const tail = subj ? ` · ${subj}` : "";
       return { label: "system", color: "green", text: `recovery commit ${sha}${tail}` };
     }
+    case "session_rotated": {
+      const reason = s("reason") || "?";
+      const prev = s("previous_session_id");
+      const prevTail = prev ? ` (was ${prev.slice(0, 8)})` : "";
+      return { label: "system", color: "cyan",
+        text: `session rotated · ${reason}${prevTail}` };
+    }
     case "done":
       return { label: "system", color: "green",
         text: `done · ${s("final_commit_sha").slice(0, 7)}` };
@@ -372,7 +379,7 @@ function Running({ view }: { view: TuiViewModel }): React.ReactElement {
     <Box flexDirection="column" flexGrow={1}>
       <BuildLoopHeader view={view} />
       <TranscriptPane view={view} focus={focus} />
-      <UsagePane usage={view.usage} />
+      <UsagePane usage={view.usage} contextTokens={view.lastContextTokens} contextWindowTokens={view.contextWindowTokens} />
       <Controls hint={view.controlsHint} />
     </Box>
   );
@@ -387,7 +394,7 @@ function Paused({ view }: { view: TuiViewModel }): React.ReactElement {
         <Text>reason:    {view.pause?.reason ?? "—"}</Text>
         <Text>resumes in: {view.pause ? formatCountdown(view.pause.until) : "—"}</Text>
       </Pane>
-      <UsagePane usage={view.usage} />
+      <UsagePane usage={view.usage} contextTokens={view.lastContextTokens} contextWindowTokens={view.contextWindowTokens} />
       <TranscriptPane view={view} focus={focus} />
       <Controls hint={view.controlsHint} />
     </Box>
@@ -407,7 +414,7 @@ function OperatorPaused({ view }: { view: TuiViewModel }): React.ReactElement {
         <Text dimColor>the in-flight step finished; ccloop will start the next step on resume</Text>
       </Pane>
       <TranscriptPane view={view} focus={focus} />
-      <UsagePane usage={view.usage} />
+      <UsagePane usage={view.usage} contextTokens={view.lastContextTokens} contextWindowTokens={view.contextWindowTokens} />
       <Controls hint={view.controlsHint} />
     </Box>
   );

@@ -64,6 +64,11 @@ export type DriverEvent =
       ok: boolean;
       error?: string;
     })
+  | (EventBase & {
+      type: "session_rotated";
+      reason: "context_overflow" | "step_cap";
+      previous_session_id: string | null;
+    })
   | (EventBase & { type: "stream_chunk"; turn: TurnEvent })
   | (EventBase & { type: "cadence_wait_enter"; started_at: IsoTimestamp; total_ms: number })
   | (EventBase & { type: "cadence_wait_exit" });
@@ -414,14 +419,30 @@ export class LoopDriver {
     // a turn but unwedge the run. Without this the same poisoned
     // session would be replayed every step until escalation.
     if (failure?.category === "context_overflow") {
+      const previous = state.session_id;
       state.session_id = null;
       state.steps_since_session_reset = 0;
+      await this.emit({
+        run_id: state.run_id,
+        step: state.current_step,
+        type: "session_rotated",
+        reason: "context_overflow",
+        previous_session_id: previous,
+      });
     }
 
     const cap = this.config.claude.max_steps_per_session;
     if (cap > 0 && state.steps_since_session_reset >= cap) {
+      const previous = state.session_id;
       state.session_id = null;
       state.steps_since_session_reset = 0;
+      await this.emit({
+        run_id: state.run_id,
+        step: state.current_step,
+        type: "session_rotated",
+        reason: "step_cap",
+        previous_session_id: previous,
+      });
     }
 
     const cacheWarn = trackCacheStreak(state, rec);

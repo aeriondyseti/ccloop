@@ -38,6 +38,10 @@ export interface ProjectorInput {
   checklist?: { done: number; total: number } | null;
   now: Date;
   finalCommitSha?: string;
+  /** Configured model id, used to pick the context-window denominator
+   *  (200K default, 1M when the id contains "1m"). Empty / undefined
+   *  → 200K. */
+  model?: string;
   /** Operator pause flag — projects as `OPERATOR_PAUSED` when the
    *  underlying state is `running`. State.json itself is unchanged
    *  (operator pause is per-instance, not durable). */
@@ -93,6 +97,14 @@ export function project(input: ProjectorInput): TuiViewModel {
   }
   const avgCache = cacheRateSamples > 0 ? cacheRateSum / cacheRateSamples : 0;
 
+  const lastStep = input.recent[input.recent.length - 1];
+  const lastContextTokens = lastStep
+    ? lastStep.usage.input_tokens +
+      lastStep.usage.cache_read_input_tokens +
+      lastStep.usage.cache_creation_input_tokens
+    : 0;
+  const contextWindowTokens = pickContextWindow(input.model);
+
   return {
     state: tuiState,
     step: input.state.current_step,
@@ -106,6 +118,8 @@ export function project(input: ProjectorInput): TuiViewModel {
     rollingTokensOut: tokensOut,
     averageCacheHitRate: avgCache,
     cacheLowStreak: input.state.cache_low_streak,
+    lastContextTokens,
+    contextWindowTokens,
     transcript: mergeTranscript(input.events, input.nowContent ?? []),
     focus: input.focus ?? "transcript",
     heartbeat: input.heartbeat ?? "●",
@@ -133,6 +147,15 @@ export function project(input: ProjectorInput): TuiViewModel {
     checklist:
       input.checklist && input.checklist.total > 0 ? input.checklist : null,
   };
+}
+
+/** Effective context window for the active model. ccloop uses Sonnet
+ *  / Opus by default (200K). The 1M-context Sonnet variant is opted
+ *  into via a model id containing "1m"; surface that here so the
+ *  utilization bar's denominator stays accurate. */
+function pickContextWindow(model: string | undefined): number {
+  if (model && /1m/i.test(model)) return 1_000_000;
+  return 200_000;
 }
 
 /** Merge lifecycle and turn events into a single chronological list.
