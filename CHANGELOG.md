@@ -4,6 +4,14 @@ All notable changes to ccloop. Newest at the top.
 
 ## Unreleased
 
+### Fixed
+- **Design-mode `MultiEdit` sandbox bypass.** `getTargetPath` only
+  returned the first edit's `file_path`, so an agent could escape the
+  `.ccloop/design/` write boundary by placing a permitted path first
+  in `edits[]` and a forbidden one in any later element. The check
+  now iterates every edit and denies if any path lies outside
+  `designDir`. Adds the regression test that was missing.
+
 ### Added
 - **Session compaction on rotation.** The proactive rotation paths
   (step-cap and context-threshold) now summarize the expiring SDK

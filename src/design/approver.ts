@@ -22,7 +22,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { type Platform, detectPlatform, wrapBash } from "../sandbox/wrap.ts";
 import { checkDenylist } from "../sandbox/denylist.ts";
-import { join, normalize, relative } from "node:path";
+import { join, normalize, relative, sep } from "node:path";
 
 export interface DesignApproverOptions {
   cwd: string;
@@ -71,28 +71,26 @@ export function makeDesignApprover(opts: DesignApproverOptions): HookCallback {
       return allow();
     }
 
-    // Restrict file edits to .ccloop/design/ only
     if (FILE_EDIT_TOOLS.has(toolName)) {
-      const filePath = getTargetPath(toolInput, toolName);
-      if (!filePath) {
-        // No path provided; let the tool handle the error
-        return allow();
-      }
-
-      // Normalize the path and check if it's under .ccloop/design/
-      const absolutePath = normalize(join(opts.cwd, filePath));
-      const rel = relative(designDir, absolutePath);
-
-      // If relative path starts with ".." or is absolute, it's outside designDir
-      if (rel.startsWith("..") || relative(designDir, absolutePath).startsWith("/")) {
+      const paths = getTargetPaths(toolInput, toolName);
+      // Empty list = no path supplied; let the tool error out itself.
+      if (paths.length === 0) return allow();
+      // Every path must land under designDir. MultiEdit can carry
+      // many; the agent can otherwise smuggle a forbidden path past
+      // the gate by putting a permitted one first.
+      for (const filePath of paths) {
+        const absolutePath = normalize(join(opts.cwd, filePath));
+        const rel = relative(designDir, absolutePath);
+        if (rel === "" || (!rel.startsWith("..") && !rel.startsWith(".." + sep))) {
+          continue;
+        }
         return denyWith(
           `Design mode can only write to .ccloop/design/. ` +
           `Attempted to write to: ${filePath}. ` +
           `Please use paths under .ccloop/design/ for spec.draft.md, ` +
-          `ROADMAP.md, IDEAS.md, or TECH-DEBT.md.`
+          `ROADMAP.md, IDEAS.md, or TECH-DEBT.md.`,
         );
       }
-
       return allow();
     }
 
@@ -101,30 +99,32 @@ export function makeDesignApprover(opts: DesignApproverOptions): HookCallback {
   };
 }
 
-/**
- * Extract the target file path from tool input.
- *
- * Different tools use different parameter names for the file path.
- */
-function getTargetPath(toolInput: Record<string, unknown>, toolName: string): string | null {
+/** Every file path the tool wants to touch. MultiEdit can name many;
+ *  the gate must check all of them. Returns [] if no path is parseable
+ *  so the caller falls through to letting the tool itself handle the
+ *  malformed input. */
+function getTargetPaths(toolInput: Record<string, unknown>, toolName: string): string[] {
   if (toolName === "Edit" || toolName === "Write") {
-    return typeof toolInput.file_path === "string" ? toolInput.file_path : null;
+    return typeof toolInput.file_path === "string" ? [toolInput.file_path] : [];
   }
   if (toolName === "NotebookEdit") {
-    return typeof toolInput.notebook_path === "string" ? toolInput.notebook_path : null;
+    return typeof toolInput.notebook_path === "string" ? [toolInput.notebook_path] : [];
   }
   if (toolName === "MultiEdit") {
-    // MultiEdit operates on multiple files; check the edits array
-    if (Array.isArray(toolInput.edits)) {
-      // Return first file path for validation (all should be checked)
-      const firstEdit = toolInput.edits[0];
-      if (firstEdit && typeof firstEdit === "object") {
-        const edit = firstEdit as Record<string, unknown>;
-        return typeof edit.file_path === "string" ? edit.file_path : null;
+    if (!Array.isArray(toolInput.edits)) return [];
+    const out: string[] = [];
+    for (const edit of toolInput.edits) {
+      if (edit && typeof edit === "object") {
+        const fp = (edit as Record<string, unknown>).file_path;
+        if (typeof fp === "string") out.push(fp);
       }
     }
+    // Also check `file_path` on the input itself if MultiEdit carries
+    // it at the top level (some SDK shapes do).
+    if (typeof toolInput.file_path === "string") out.push(toolInput.file_path);
+    return out;
   }
-  return null;
+  return [];
 }
 
 function allow(updatedInput?: Record<string, unknown>): HookJSONOutput {

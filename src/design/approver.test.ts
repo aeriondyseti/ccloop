@@ -17,6 +17,16 @@ async function callHook(approver: ReturnType<typeof makeDesignApprover>, input: 
   return await approver(input, undefined, { signal: abortController.signal });
 }
 
+function decisionOf(result: unknown): "allow" | "deny" | "passthrough" {
+  if (!result || typeof result !== "object") return "passthrough";
+  const r = result as Record<string, unknown>;
+  if (r.continue === true) return "passthrough";
+  const out = r.hookSpecificOutput as Record<string, unknown> | undefined;
+  const decision = out?.permissionDecision;
+  if (decision === "allow" || decision === "deny") return decision;
+  return "passthrough";
+}
+
 describe("makeDesignApprover", () => {
   describe("file edit tools", () => {
     test("allows Write to .ccloop/design/spec.draft.md", async () => {
@@ -49,7 +59,46 @@ describe("makeDesignApprover", () => {
       });
 
       const result = await callHook(approver, input);
-      expect(result).toHaveProperty("hookSpecificOutput");
+      expect(decisionOf(result)).toBe("deny");
+    });
+
+    test("MultiEdit allows when every edit is under .ccloop/design/", async () => {
+      const approver = makeDesignApprover({ cwd: CWD });
+      const result = await callHook(approver, makeInput("MultiEdit", {
+        edits: [
+          { file_path: ".ccloop/design/spec.draft.md" },
+          { file_path: ".ccloop/design/ROADMAP.md" },
+        ],
+      }));
+      expect(decisionOf(result)).toBe("allow");
+    });
+
+    test("MultiEdit denies when ANY later edit escapes — not just the first", async () => {
+      // Regression: getTargetPath used to return only edits[0].file_path,
+      // letting an agent smuggle a forbidden path past the gate by
+      // putting a permitted one first.
+      const approver = makeDesignApprover({ cwd: CWD });
+      const result = await callHook(approver, makeInput("MultiEdit", {
+        edits: [
+          { file_path: ".ccloop/design/spec.draft.md" }, // permitted
+          { file_path: "../../etc/passwd" },             // smuggled
+        ],
+      }));
+      expect(decisionOf(result)).toBe("deny");
+    });
+
+    test("MultiEdit denies an absolute path outside designDir", async () => {
+      const approver = makeDesignApprover({ cwd: CWD });
+      const result = await callHook(approver, makeInput("MultiEdit", {
+        edits: [{ file_path: "/etc/passwd" }],
+      }));
+      expect(decisionOf(result)).toBe("deny");
+    });
+
+    test("MultiEdit with no parseable paths falls through (tool handles error)", async () => {
+      const approver = makeDesignApprover({ cwd: CWD });
+      const result = await callHook(approver, makeInput("MultiEdit", { edits: [] }));
+      expect(decisionOf(result)).toBe("allow");
     });
   });
 
