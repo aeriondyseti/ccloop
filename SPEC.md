@@ -101,7 +101,7 @@ Pinned terms used by this spec:
       `draft_edit`, `design_session_accept`, `design_session_abort`,
       `design_session_end`. Event records include phase, turn count,
       cost, cache rate.
-- [ ] **Tests.** Unit tests for: `ask_user` MCP tool input/output
+- [x] **Tests.** Unit tests for: `ask_user` MCP tool input/output
       contract, draft sandbox enforcement (writes outside
       `./.ccloop/design/` rejected), promote-on-accept flow,
       validation-gate failure path, resume-with-existing-draft,
