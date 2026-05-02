@@ -1632,6 +1632,69 @@ ccloop does not "self-heal" — if the user broke it, fix or delete.
 
 ---
 
+## 13c. Design Loop
+
+The design loop (`ccloop design`) is an interactive mode that produces
+a validated `SPEC.md` for the build loop to consume. Unlike the build
+loop's autonomous execution, the design loop is human-in-the-loop:
+the agent guides the user through a structured design process.
+
+**Implementation location**: `src/design/`
+
+**Key modules**:
+- `types.ts` — core types (DesignPhase, DesignSessionState, events)
+- `constants.ts` — phase order, default config, artifact paths
+- `prompts.ts` — system prompt + per-phase scaffolding
+- `draft.ts` — draft initialization, validation (reuses `validateSpec`), promotion
+- `session.ts` — metadata persistence for resume
+- `events.ts` — lifecycle events to `.ccloop/events.jsonl`
+- `approver.ts` — PreToolUse hook restricting writes to `.ccloop/design/`
+- `acceptance.ts` — validation gate logic when user signals accept
+
+**Design artifacts** (all under `./.ccloop/design/`):
+- `spec.draft.md` — in-progress spec
+- `ROADMAP.md` — future scope (optional, promoted if exists)
+- `IDEAS.md` — idea parking lot (optional, promoted if exists)
+- `TECH-DEBT.md` — intentional shortcuts (optional, promoted if exists)
+- `session.json` — resume metadata (phase, turn count, cost)
+- `last-session.md` — graceful-shutdown summary (Ctrl+C)
+
+**Phase flow** (linear in MVP):
+1. Vision → 2. Users → 3. Scope → 4. Architecture → 5. Milestones → 6. Acceptance
+
+**Agent tools** (sandbox-restricted via `makeDesignApprover`):
+- Read/Grep/Glob (read-only, anywhere in CWD)
+- Edit/Write (path-restricted to `.ccloop/design/` only)
+- Bash (sandboxed via bwrap/sandbox-exec, same as build loop)
+- WebSearch/WebFetch
+- `ask_user` MCP tool (in-process server, multiple-choice prompts)
+
+**Resume model**: On re-invocation, if `spec.draft.md` exists, load it
+as starting state. Conversation history is **not** restored (fresh SDK
+session each time); the draft itself provides continuity.
+
+**Acceptance flow**: When user signals accept (via `ask_user` or future
+slash command), run `validateSpec` on draft. If validation fails,
+surface errors and stay in loop. If validation passes, prompt user to
+confirm promotion. On confirm, copy draft + sibling artifacts to
+project root, offer to launch `ccloop build`.
+
+**Configuration**: `ccloop.toml` `[design]` section. Keys: `model`
+(defaults to Opus, independent of `[build].model`), `max_turns`
+(default 100), `effort` (default "high"), `enable_tui` (default true).
+
+**Event emission**: Design sessions emit to the same `events.jsonl` as
+the build loop. Event types: `design_session_start`,
+`design_phase_enter`, `ask_user_asked`, `ask_user_answered`,
+`draft_edit`, `design_session_accept`, `design_session_abort`,
+`design_session_end`.
+
+**No global state**: All design state lives in `.ccloop/design/`.
+Deleting that directory clears design session; deleting `.ccloop/`
+clears everything.
+
+---
+
 ## 14. Known Unknowns
 
 Items requiring empirical validation during build, not assumption.
@@ -1700,3 +1763,59 @@ Items requiring empirical validation during build, not assumption.
 This section is the punch-list. The implementing agent closes each
 item by capturing data and updating the relevant section. After MVP,
 this section can be deleted along with the rest of `.claude/`.
+
+## 15. Design loop
+
+The design loop ships as a sibling to the build loop and produces a
+validated `./SPEC.md` that the build loop then consumes. The full
+contract for that feature lives at `./SPEC.md` (the dogfood spec at
+the repo root). This section is a pointer map — not a re-statement.
+
+### 15.1 Vocabulary
+
+- **Design session** — one invocation of `ccloop design`. Interactive,
+  human-in-the-loop. Distinct from a build *run*.
+- **Phase** — vision → users → scope → architecture → milestones →
+  acceptance. Linear in MVP.
+- **Draft** — `./.ccloop/design/spec.draft.md`, the in-progress spec.
+- **Promote** — copy the validated draft to `./SPEC.md` (with sibling
+  artifacts) on user accept.
+
+### 15.2 Code map
+
+- `src/cli/dispatch.ts` — `route()` adds `design`, `build` (alias for
+  `run`), and bare-`ccloop` auto-routing via `pickAutoLoop()`.
+- `src/cli/design.ts` — `runDesign()` parses flags, loads config,
+  installs SIGINT handling, and picks a TUI vs stdio adapter.
+- `src/design/orchestrator.ts` — `runDesignSession()` owns the SDK
+  conversation loop, MCP server, sandbox approver, draft promotion,
+  and lifecycle events. Decoupled from rendering via `IoAdapter`.
+- `src/design/io.ts`, `io-stdio.ts` — `IoAdapter` contract and the
+  plain-stdio implementation used in non-TTY environments.
+- `src/design/draft.ts` — initialization, validation, promotion.
+- `src/design/acceptance.ts` — `/accept` validation gate.
+- `src/design/approver.ts` — PreToolUse hook restricting Edit/Write
+  to `.ccloop/design/` and wrapping Bash in the same sandbox the
+  build loop uses.
+- `src/design/events.ts` — lifecycle event emitter writing to
+  `.ccloop/events.jsonl` (shared with the build loop).
+- `src/design/prompts.ts` — `DESIGN_SYSTEM_PROMPT` plus per-phase
+  prompt fragments.
+- `src/design/shutdown.ts` — `ShutdownSignal` for the two-tier
+  Ctrl+C contract (graceful summary turn → force-abort).
+- `src/mcp/server.ts`, `ask-user.ts` — in-process MCP server
+  exposing the `ask_user` tool the design agent invokes.
+- `src/tui/DesignDashboard.tsx` + `design-bridge.ts` — two-pane Ink
+  TUI (transcript + live draft) with ask_user / confirm / input
+  widgets bridged to the orchestrator's `IoAdapter`.
+
+### 15.3 Notes for future work
+
+- The orchestrator does not currently track phase transitions; the
+  agent is told about phases via the system prompt but
+  `design_phase_enter` events never fire. Adding phase tracking is
+  small if the dashboard wants to render a phase indicator.
+- Conversation history is not persisted across invocations; only
+  the draft on disk is. If long sessions need resume-with-history,
+  store the SDK session_id in `.ccloop/design/session.json` and
+  pass it as `resume` on next launch.

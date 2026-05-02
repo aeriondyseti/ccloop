@@ -648,6 +648,13 @@ function trackCacheStreak(
   return null;
 }
 
+/** Soft cap on lines of error excerpt the prompt will carry. The
+ *  visual-column cap in capExcerpt does most of the work, but
+ *  `stringWidth` treats newlines as zero-width — a dense stack
+ *  trace can clear the column cap and still drag in 50+ lines that
+ *  live forever in the resumed session. Trim by lines first. */
+const LAST_ERROR_LINE_CAP = 40;
+
 /** Build the prompt's `{{last_error}}` block from state. Empty string
  *  when there's nothing to report; otherwise a short markdown section
  *  with the failure category and excerpt so Claude can course-correct
@@ -657,7 +664,7 @@ export function renderLastError(state: CcloopState): string {
   if (state.escalation !== null) return "";
   const lf = state.last_failure;
   if (!lf) return "";
-  const trimmed = lf.excerpt.trim();
+  const trimmed = trimToLastLines(lf.excerpt.trim(), LAST_ERROR_LINE_CAP);
   if (trimmed.length === 0) {
     return `# Previous step failed (${lf.category}).\n\nWork through the issue and try again.\n`;
   }
@@ -669,6 +676,16 @@ export function renderLastError(state: CcloopState): string {
   const fence = "`".repeat(Math.max(3, longestBacktickRun(trimmed) + 1));
   const body = `\n\n${fence}\n${trimmed}\n${fence}\n`;
   return `# Previous step failed (${lf.category}).${body}\nWork through the issue and try again.\n`;
+}
+
+/** Keep at most the last N lines, prepending an ellipsis line when
+ *  truncation occurred so the model knows context was elided. */
+export function trimToLastLines(s: string, maxLines: number): string {
+  if (maxLines <= 0) return "";
+  const lines = s.split("\n");
+  if (lines.length <= maxLines) return s;
+  const kept = lines.slice(-maxLines);
+  return `… (${lines.length - maxLines} earlier lines elided)\n${kept.join("\n")}`;
 }
 
 function longestBacktickRun(s: string): number {

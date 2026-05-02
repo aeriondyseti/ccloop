@@ -57,7 +57,7 @@ yolo_mode = false
 
 # SDK's maxTurns. Bounds Anthropic-turns per ccloop step. (Anthropic
 # "turn" = ccloop "inference"; see SPEC §2.5.)
-max_turns_per_step = 50
+max_turns_per_step = 20
 
 # How many in-step auto-continuations after stop_reason="pause_turn"
 # before giving up. When pause_turn fires, ccloop calls the SDK again

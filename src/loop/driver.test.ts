@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runtimePaths } from "../state/paths.ts";
 import { type CcloopConfig, DEFAULTS } from "../config/schema.ts";
 import { freshState } from "../state/state.ts";
-import { type DriverEvent, LoopDriver, isLoopStuck, renderLastError } from "./driver.ts";
+import { type DriverEvent, LoopDriver, isLoopStuck, renderLastError, trimToLastLines } from "./driver.ts";
 import { EventBus } from "./eventBus.ts";
 import type { StepResult } from "../sdk/types.ts";
 import { emptyUsage } from "../sdk/types.ts";
@@ -60,6 +60,30 @@ describe("renderLastError", () => {
     s.last_failure = { category: "sdk", excerpt: "plain error message" };
     const out = renderLastError(s);
     expect(out).toContain("```\nplain error message\n```");
+  });
+
+  test("trims excerpt to the last 40 lines with an elision marker", () => {
+    const s = freshState();
+    const lines = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`);
+    s.last_failure = { category: "sdk", excerpt: lines.join("\n") };
+    const out = renderLastError(s);
+    expect(out).toContain("60 earlier lines elided");
+    expect(out).toContain("line 100");
+    expect(out).toContain("line 61");
+    expect(out).not.toContain("line 60\n");
+  });
+});
+
+describe("trimToLastLines", () => {
+  test("returns input unchanged when under cap", () => {
+    expect(trimToLastLines("a\nb\nc", 10)).toBe("a\nb\nc");
+  });
+  test("keeps last N lines and prepends an elision header", () => {
+    const out = trimToLastLines("1\n2\n3\n4\n5", 2);
+    expect(out).toBe("… (3 earlier lines elided)\n4\n5");
+  });
+  test("maxLines=0 collapses to empty", () => {
+    expect(trimToLastLines("anything", 0)).toBe("");
   });
 });
 

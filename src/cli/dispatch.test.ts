@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { run } from "./dispatch.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { route, run, pickAutoLoop } from "./dispatch.ts";
 import { IS_DEV_BUILD } from "../build-info.ts";
 
 /**
@@ -68,8 +71,16 @@ describe("dispatch (dev build)", () => {
   });
 
   test("help shows dev-build extras section", async () => {
-    await run([]);
+    await run(["help"]);
     expect(stdoutChunks.join("")).toContain("Dev-build extras");
+  });
+
+  test("--help and -h also print help", async () => {
+    await run(["--help"]);
+    const out = stdoutChunks.join("");
+    expect(out).toContain("ccloop — Claude Code loop runner");
+    expect(out).toContain("ccloop design");
+    expect(out).toContain("ccloop build");
   });
 
   test("--debug is consumed before subcommand routing", async () => {
@@ -78,5 +89,66 @@ describe("dispatch (dev build)", () => {
     // of position.
     const code = await run(["--debug", "--version"]);
     expect(code).toBe(0);
+  });
+});
+
+describe("route()", () => {
+  test("bare argv is auto", () => {
+    expect(route([])).toEqual({ kind: "auto", rest: [] });
+  });
+  test("flag-only argv is auto and forwards flags", () => {
+    expect(route(["--yolo"])).toEqual({ kind: "auto", rest: ["--yolo"] });
+  });
+  test("design subcommand routes to design", () => {
+    expect(route(["design", "--no-tui"])).toEqual({ kind: "design", rest: ["--no-tui"] });
+  });
+  test("build subcommand routes to run (alias)", () => {
+    expect(route(["build", "-y"])).toEqual({ kind: "run", rest: ["-y"] });
+  });
+  test("run subcommand still routes to run", () => {
+    expect(route(["run", "-y"])).toEqual({ kind: "run", rest: ["-y"] });
+  });
+  test("init routes to init", () => {
+    expect(route(["init"])).toEqual({ kind: "init", rest: [] });
+  });
+  test("help-likes route to help", () => {
+    expect(route(["--help"])).toEqual({ kind: "help" });
+    expect(route(["-h"])).toEqual({ kind: "help" });
+    expect(route(["help"])).toEqual({ kind: "help" });
+  });
+  test("version-likes route to version", () => {
+    expect(route(["--version"])).toEqual({ kind: "version" });
+    expect(route(["-V"])).toEqual({ kind: "version" });
+  });
+  test("unknown subcommand surfaces the offending token", () => {
+    expect(route(["bogus"])).toEqual({ kind: "unknown", first: "bogus" });
+  });
+  test("debug:foo routes to debug", () => {
+    expect(route(["debug:info", "--x"])).toEqual({ kind: "debug", cmd: "info", rest: ["--x"] });
+  });
+});
+
+describe("pickAutoLoop()", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ccloop-route-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("missing SPEC.md → design", async () => {
+    expect(await pickAutoLoop(dir)).toBe("design");
+  });
+  test("invalid SPEC.md (no checklist) → design", async () => {
+    writeFileSync(join(dir, "SPEC.md"), "# nothing here\n");
+    expect(await pickAutoLoop(dir)).toBe("design");
+  });
+  test("valid SPEC.md → build", async () => {
+    writeFileSync(
+      join(dir, "SPEC.md"),
+      "# Spec\n\n- [ ] do thing\n\n## Verification Requirements\n\nIt works.\n",
+    );
+    expect(await pickAutoLoop(dir)).toBe("build");
   });
 });
