@@ -36,6 +36,7 @@ describe("resetForContinue", () => {
     s.no_progress_count = 3;
     s.diff_hashes_recent = ["a", "a", "a"];
     s.escalation = { reason: "x", trail: [], entered_at: asIsoTimestamp("") };
+    s.last_failure = { category: "sdk", excerpt: "old failure" };
     s.state = "escalated";
     s.current_step = 47;
     resetForContinue(s);
@@ -43,6 +44,7 @@ describe("resetForContinue", () => {
     expect(s.no_progress_count).toBe(0);
     expect(s.diff_hashes_recent).toEqual([]);
     expect(s.escalation).toBeNull();
+    expect(s.last_failure).toBeNull();
     expect(s.state as string).toBe("running");
     expect(s.current_step).toBe(47);
   });

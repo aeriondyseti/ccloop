@@ -13,6 +13,7 @@ export interface RuntimePaths {
   progress: string;      // progress.md
   steps: string;         // steps/
   promptOverride: string; // prompt.md (optional)
+  worktree: string;       // worktree/ (when loop.use_worktree)
 }
 
 export function runtimePaths(cwd: string): RuntimePaths {
@@ -25,6 +26,7 @@ export function runtimePaths(cwd: string): RuntimePaths {
     progress: join(root, "progress.md"),
     steps: join(root, "steps"),
     promptOverride: join(root, "prompt.md"),
+    worktree: join(root, "worktree"),
   };
 }
 

@@ -13,10 +13,19 @@ describe("cacheHitRate", () => {
     })).toBe(0.9);
   });
 
-  test("output and creation do not affect numerator/denominator", () => {
+  test("cache creation counts as miss in denominator", () => {
+    // 900 cached read, 100 fresh input, 1000 written to cache.
+    // Hit rate = 900 / (900 + 1000 + 100) = 0.45.
+    expect(cacheHitRate({
+      input_tokens: 100, output_tokens: 0,
+      cache_read_input_tokens: 900, cache_creation_input_tokens: 1000,
+    })).toBe(0.45);
+  });
+
+  test("output tokens do not affect rate", () => {
     expect(cacheHitRate({
       input_tokens: 50, output_tokens: 9999,
-      cache_read_input_tokens: 50, cache_creation_input_tokens: 9999,
+      cache_read_input_tokens: 50, cache_creation_input_tokens: 0,
     })).toBe(0.5);
   });
 });

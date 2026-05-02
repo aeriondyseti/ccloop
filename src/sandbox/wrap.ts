@@ -45,22 +45,22 @@ export function wrapBash(input: WrapInput): WrapResult {
   return { kind: "passthrough" };
 }
 
-/** bwrap invocation: read-only / for system, RW for CWD, no net. */
+/** bwrap invocation: ro-bind the whole rootfs, then layer writable
+ *  surfaces on top (tmpfs `/tmp`, RW CWD, fresh `/proc` and `/dev`).
+ *  This mirrors the macOS profile's `(allow default) (deny file-write*)`
+ *  shape: reads are unrestricted (so user toolchains under `$HOME`
+ *  like mise/asdf/nvm/~.bun/~.cargo resolve), writes are scoped to
+ *  CWD and `/tmp`. Network is allowed so `bun install`, `npm install`,
+ *  etc. work — the boundary is filesystem scope, not exfiltration. */
 export function bwrapCommand(bwrapBin: string, cwd: string, command: string): string {
   const args = [
     bwrapBin,
-    "--ro-bind", "/usr", "/usr",
-    "--ro-bind", "/lib", "/lib",
-    "--ro-bind-try", "/lib64", "/lib64",
-    "--ro-bind-try", "/bin", "/bin",
-    "--ro-bind-try", "/sbin", "/sbin",
-    "--ro-bind-try", "/etc", "/etc",
+    "--ro-bind", "/", "/",
     "--proc", "/proc",
     "--dev", "/dev",
     "--tmpfs", "/tmp",
     "--bind", quote(cwd), quote(cwd),
     "--chdir", quote(cwd),
-    "--unshare-net",
     "--die-with-parent",
     "--",
     "/bin/sh", "-c", quote(command),

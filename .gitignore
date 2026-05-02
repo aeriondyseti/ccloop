@@ -1,6 +1,7 @@
 node_modules/
 .ccloop/
 .vector-memory/
+.serena/
 **/.ccloop/
 *.log
 .DS_Store

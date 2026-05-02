@@ -1,11 +1,11 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { type RuntimePaths, stepRecordPath } from "../state/paths.ts";
+import { atomicWriteFile } from "../util/atomic.ts";
 import { type StepUsage, cacheHitRate } from "../sdk/types.ts";
 import {
   type IsoTimestamp, type RunId, type SessionId, type Sha,
   isoFromDate,
 } from "../branded.ts";
+import type { StepFailure } from "./classify.ts";
 
 export type StepOutcome = "success" | "failure" | "no-op";
 
@@ -25,7 +25,7 @@ export interface StepRecord {
   cache_hit_rate: number;
   commit_sha: Sha;
   commit_subject: string;
-  failure: { category: string; excerpt: string } | null;
+  failure: StepFailure | null;
 }
 
 export async function writeStepRecord(
@@ -33,9 +33,7 @@ export async function writeStepRecord(
   rec: StepRecord,
 ): Promise<string> {
   const path = stepRecordPath(paths, rec.step);
-  await mkdir(dirname(path), { recursive: true });
-  const body = JSON.stringify(rec, null, 2);
-  await writeFile(path, body, "utf8");
+  await atomicWriteFile(path, JSON.stringify(rec, null, 2));
   return path;
 }
 
@@ -53,7 +51,7 @@ export function buildStepRecord(args: {
   costUsd: number;
   commitSha: Sha;
   commitSubject: string;
-  failure: { category: string; excerpt: string } | null;
+  failure: StepFailure | null;
 }): StepRecord {
   return {
     step: args.step,

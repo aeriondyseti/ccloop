@@ -27,6 +27,64 @@ describe("project", () => {
     expect(v.controlsHint).toMatch(/ctrl-c/);
   });
 
+  test("RUNNING controls hint advertises scroll keys", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.controlsHint).toMatch(/scroll/);
+  });
+
+  test("transcript merges turn events and lifecycle entries chronologically", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [],
+      events: [
+        { ts: "2026-05-01T10:00:00Z", type: "step_start", step: 1, run_id: "r" },
+        { ts: "2026-05-01T10:00:05Z", type: "step_end", step: 1, run_id: "r",
+          outcome: "success", duration_ms: 5000, cost_usd: 0.01 },
+      ],
+      now: new Date(),
+      nowContent: [
+        { kind: "turn_start", turn: 1, ts: "2026-05-01T10:00:01Z" },
+        { kind: "assistant_text", text: "hi", ts: "2026-05-01T10:00:02Z" },
+      ],
+      focus: "transcript",
+      heartbeat: "○",
+    });
+    expect(v.transcript.length).toBe(4);
+    expect(v.transcript[0]?.source).toBe("lifecycle");
+    expect(v.transcript[1]?.source).toBe("turn");
+    expect(v.transcript[2]?.source).toBe("turn");
+    expect(v.transcript[3]?.source).toBe("lifecycle");
+    expect(v.focus).toBe("transcript");
+    expect(v.heartbeat).toBe("○");
+  });
+
+  test("transcript / focus / heartbeat have sensible defaults", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.transcript).toEqual([]);
+    expect(v.focus).toBe("transcript");
+    expect(v.heartbeat).toBe("●");
+  });
+
+  test("rolling stats sum across many records (recent-steps pane removed)", () => {
+    const s = freshState();
+    const many = Array.from({ length: 50 }, (_, i) =>
+      rec({ step: i + 1, cost_usd: 0.1, cache_hit_rate: 0.5,
+            usage: { ...emptyUsage(), input_tokens: 1, output_tokens: 1 } }));
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: many, events: [],
+      now: new Date(),
+    });
+    expect(v.rollingCostUsd).toBeCloseTo(5.0);
+    expect(v.rollingTokensIn).toBe(50);
+    expect(v.rollingTokensOut).toBe(50);
+  });
+
   test("rolling stats sum across records", () => {
     const s = freshState();
     const v = project({
@@ -42,6 +100,54 @@ describe("project", () => {
     expect(v.rollingTokensIn).toBe(30);
     expect(v.rollingTokensOut).toBe(10);
     expect(v.averageCacheHitRate).toBe(0.75);
+    expect(v.cacheLowStreak).toBe(0);
+  });
+
+  test("averageCacheHitRate excludes records with no token usage", () => {
+    // step_timeout / synthesized-failure records carry empty usage and
+    // a 0 cache_hit_rate. Including them would pull the displayed
+    // average toward zero on overnight runs that survived a few hangs
+    // even though real cache behaviour is healthy.
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, events: [], now: new Date(),
+      recent: [
+        rec({ cost_usd: 0.1, cache_hit_rate: 1.0,
+              usage: { ...emptyUsage(), input_tokens: 10, output_tokens: 5 } }),
+        // Synthesized failure: zero usage, zero rate — must not count.
+        rec({ cost_usd: 0, cache_hit_rate: 0, usage: emptyUsage() }),
+        rec({ cost_usd: 0.2, cache_hit_rate: 0.8,
+              usage: { ...emptyUsage(), input_tokens: 20, output_tokens: 5 } }),
+      ],
+    });
+    expect(v.averageCacheHitRate).toBeCloseTo(0.9); // (1.0 + 0.8) / 2
+  });
+
+  test("checklist is surfaced when total > 0 and suppressed otherwise", () => {
+    const s = freshState();
+    const v1 = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      checklist: { done: 7, total: 12 },
+    });
+    expect(v1.checklist).toEqual({ done: 7, total: 12 });
+    const v2 = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      checklist: { done: 0, total: 0 },
+    });
+    expect(v2.checklist).toBeNull();
+    const v3 = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v3.checklist).toBeNull();
+  });
+
+  test("cacheLowStreak is surfaced from state", () => {
+    const s = freshState();
+    s.cache_low_streak = 4;
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.cacheLowStreak).toBe(4);
   });
 
   test("escalated state surfaces reason", () => {
@@ -69,5 +175,63 @@ describe("project", () => {
     });
     expect(v.state).toBe("PAUSED");
     expect(v.pause?.reason).toBe("5h cap");
+  });
+
+  test("operatorPaused projects to OPERATOR_PAUSED when state is running", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      operatorPaused: true,
+    });
+    expect(v.state).toBe("OPERATOR_PAUSED");
+    expect(v.controlsHint).toMatch(/p resume/);
+  });
+
+  test("operatorPaused does NOT override terminal states", () => {
+    const s = freshState();
+    s.state = "escalated";
+    s.escalation = { reason: "weekly_cap", trail: [], entered_at: asIsoTimestamp("") };
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      operatorPaused: true,
+    });
+    expect(v.state).toBe("ESCALATED");
+  });
+
+  test("RUNNING controls hint advertises p pause", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.controlsHint).toMatch(/p pause/);
+  });
+
+  test("claudeTodos picks the latest todo_state from the live stream", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      nowContent: [
+        { kind: "turn_start", turn: 1, ts: "t0" },
+        { kind: "todo_state", todos: [
+          { content: "first", status: "pending" },
+        ], ts: "t1" },
+        { kind: "tool_use", tool: "Read", summary: "spec", ts: "t2" },
+        { kind: "todo_state", todos: [
+          { content: "first", status: "completed" },
+          { content: "second", status: "in_progress" },
+        ], ts: "t3" },
+      ],
+    });
+    expect(v.claudeTodos.length).toBe(2);
+    expect(v.claudeTodos[0]?.status).toBe("completed");
+    expect(v.claudeTodos[1]?.status).toBe("in_progress");
+  });
+
+  test("claudeTodos defaults to empty when no todo_state events seen", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.claudeTodos).toEqual([]);
   });
 });

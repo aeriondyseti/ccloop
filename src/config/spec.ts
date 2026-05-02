@@ -2,12 +2,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isENOENT } from "../errors.ts";
 import { SPEC_FILENAME } from "../state/paths.ts";
+import { parseChecklist } from "../spec/checklist.ts";
 
 export type SpecCheck =
   | { ok: true; checklistCount: number }
   | { ok: false; error: string };
 
-const CHECKLIST_RE = /^\s*-\s+\[[ xX]\]\s+/m;
 const VR_HEADING_RE = /^##\s+Verification Requirements\s*$/mi;
 
 export async function validateSpec(cwd: string): Promise<SpecCheck> {
@@ -25,7 +25,10 @@ export async function validateSpec(cwd: string): Promise<SpecCheck> {
 }
 
 export function validateSpecText(text: string): SpecCheck {
-  const checklistCount = countChecklistItems(text);
+  // Share parsing with the dashboard/recap so a user whose spec uses
+  // `*` or numbered bullets isn't told "no checklist" by validation
+  // while the dashboard happily counts the same items.
+  const checklistCount = parseChecklist(text).total;
   if (checklistCount === 0) {
     return { ok: false, error: `${SPEC_FILENAME} has no checklist (need at least one \`- [ ]\` or \`- [x]\` line).` };
   }
@@ -41,12 +44,4 @@ export function validateSpecText(text: string): SpecCheck {
     return { ok: false, error: `${SPEC_FILENAME} \`## Verification Requirements\` body is empty.` };
   }
   return { ok: true, checklistCount };
-}
-
-function countChecklistItems(text: string): number {
-  let count = 0;
-  for (const line of text.split("\n")) {
-    if (CHECKLIST_RE.test(line)) count++;
-  }
-  return count;
 }

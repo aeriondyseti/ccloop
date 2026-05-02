@@ -31,6 +31,18 @@ describe("validateSpecText", () => {
     if (!r.ok) expect(r.error).toMatch(/empty/);
   });
 
+  test("accepts *, +, and numbered bullets via parseChecklist", () => {
+    // Regression: validation used to require `-` bullets while
+    // the dashboard/recap accepted any GFM task-list shape, so a
+    // spec with `* [ ] foo` would render checklist progress in the
+    // TUI but get rejected at startup.
+    const r = validateSpecText(
+      `* [ ] one\n+ [x] two\n1. [ ] three\n## Verification Requirements\n\nbody\n`,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.checklistCount).toBe(3);
+  });
+
   test("VR body bounded by next h2", () => {
     const r = validateSpecText(
       `- [ ] a\n## Verification Requirements\n\nbody\n\n## Other\n\nstuff`,

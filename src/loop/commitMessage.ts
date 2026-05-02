@@ -1,9 +1,11 @@
 /**
  * Derive a one-line auto-commit subject from the final assistant text.
  * Per §14.6: first non-blank line, stripped of leading markdown noise,
- * capped at 72 chars. Falls back to a generic subject when the text is
- * unusable.
+ * capped at 72 visual columns. Falls back to a generic subject when
+ * the text is unusable.
  */
+import { truncateToWidth } from "../util/width.ts";
+
 export function deriveCommitSubject(finalText: string, step: number): string {
   const fallback = `ccloop step ${step}`;
   if (!finalText) return fallback;
@@ -13,7 +15,7 @@ export function deriveCommitSubject(finalText: string, step: number): string {
     if (line.length === 0) continue;
     const cleaned = stripMarkdownLead(line);
     if (cleaned.length === 0) continue;
-    return capTo(cleaned, 72);
+    return truncateToWidth(cleaned, 72);
   }
   return fallback;
 }
@@ -32,7 +34,3 @@ function stripMarkdownLead(line: string): string {
   return s.trim();
 }
 
-function capTo(s: string, n: number): string {
-  if (s.length <= n) return s;
-  return s.slice(0, n - 1).trimEnd() + "…";
-}

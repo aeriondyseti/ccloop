@@ -10,26 +10,39 @@ import { confirmDefaultYes } from "./prompt.ts";
 import { runInit } from "./init.ts";
 import { CCLOOP_DIR, CONFIG_FILENAME, SPEC_FILENAME, runtimePaths } from "../state/paths.ts";
 import {
-  autoCommit, initRepoEmpty, isGitRepo, isWorkingTreeClean,
+  addWorktree, autoCommit, currentBranch, deleteBranch, hardReset, headSha,
+  initRepoEmpty, isGitRepo, isWorkingTreeClean,
+  removeWorktree, tryFastForward,
 } from "../loop/git.ts";
 import { acquireLock, LockHeldError } from "../state/lock.ts";
 import { LoopDriver } from "../loop/driver.ts";
 import { runLoop } from "../loop/orchestrator.ts";
+import { createPauseGate } from "../loop/pauseGate.ts";
 import { EventBus } from "../loop/eventBus.ts";
 import { UsageClient } from "../usage/client.ts";
-import { Dashboard } from "../tui/Dashboard.tsx";
+import { injectAuth } from "../auth/inject.ts";
+import { Dashboard, type MenuKey } from "../tui/Dashboard.tsx";
 import { project } from "../tui/projector.ts";
 import { EMPTY_VIEW } from "../tui/types.ts";
 import type { TuiViewModel } from "../tui/types.ts";
 import type { CcloopState } from "../state/state.ts";
 import { findLastGreenSha, loadRecentSteps } from "../state/stepLoader.ts";
-import { readSingleKey } from "./keys.ts";
-import { decideEscalationKey, resetForContinue } from "../loop/escalation.ts";
-import { hardReset } from "../loop/git.ts";
-import { writeState } from "../state/state.ts";
+import { EventLogger, loadRecentEvents } from "../state/events.ts";
+import { buildRecap } from "./recap.ts";
+import { parseChecklist } from "../spec/checklist.ts";
+import { readFile } from "node:fs/promises";
+import { VERSION } from "../build-info.ts";
+import { clearSessionForReorientation, decideEscalationKey, resetForContinue } from "../loop/escalation.ts";
+import { freshState, readState, writeState } from "../state/state.ts";
+import { rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 
-const TUI_TICK_MS = 250;
+const TUI_TICK_MS = 100;
+const HEARTBEAT_INTERVAL_MS = 1000;
+const LOG_CAP = 500;
+const RECENT_STEPS_CAP = 200;
+/** Window during which a second Ctrl+C is treated as "force exit". */
+const FORCE_EXIT_WINDOW_MS = 3000;
 
 export async function runRun(argv: string[]): Promise<number> {
   let flags;
@@ -39,6 +52,11 @@ export async function runRun(argv: string[]): Promise<number> {
     process.stderr.write(`ccloop run: ${(err as Error).message}\n`);
     return 1;
   }
+
+  // Honor --no-color via the standard env var. Ink (and any other
+  // chalk-aware writer) reads NO_COLOR at render time. Set it early
+  // so the first render in non-TTY echo path is also plain.
+  if (flags.noColor) process.env.NO_COLOR = "1";
 
   const cwd = process.cwd();
 
@@ -82,13 +100,19 @@ export async function runRun(argv: string[]): Promise<number> {
   }
 
   // 3. Auth gate.
-  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "";
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-  if (!token && !apiKey) {
+  const auth = injectAuth();
+  if (!auth.ok) {
     process.stderr.write(
-      "ccloop: missing auth. Set CLAUDE_CODE_OAUTH_TOKEN (recommended; run `claude setup-token`) or ANTHROPIC_API_KEY.\n",
+      "ccloop: missing auth. Set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token` for a long-lived headless token), log in via `claude /login`, or set ANTHROPIC_API_KEY.\n",
     );
     return 2;
+  }
+  const d = auth.discovered;
+  if (d && d.source !== "env") {
+    const where = d.source === "keychain-macos"
+      ? `macOS keychain (${d.detail})`
+      : d.detail;
+    process.stderr.write(`ccloop: using OAuth token from ${where}\n`);
   }
 
   // 4. Git repo + dirty-tree gate per §0 / §10.4.
@@ -115,12 +139,7 @@ export async function runRun(argv: string[]): Promise<number> {
       return 1;
     }
   }
-  // §10.4 recovery commit: --continue with a dirty tree means the
-  // previous instance was killed mid-step. Auto-commit whatever's
-  // there before resuming so the loop has a clean baseline. Step
-  // number is filled in once state is loaded (see below).
   const isResume = decision.kind === "resume_after_confirm" || decision.kind === "resume_no_prompt";
-  const needsRecoveryCommit = isResume && !(await isWorkingTreeClean(cwd));
 
   // 5. Set caching env opt-in per §6.6.
   process.env.ENABLE_PROMPT_CACHING_1H = process.env.ENABLE_PROMPT_CACHING_1H ?? "1";
@@ -139,21 +158,115 @@ export async function runRun(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // 7. Build driver, bus, optional usage client.
+  // 7. Load (or freshly mint) state, then set up the worktree before
+  // anything else takes a `cwd`. The driver, all SDK calls, and every
+  // git operation that touches the working tree run against
+  // `effectiveCwd` — for a worktree-mode run that's
+  // `<cwd>/.ccloop/worktree`. State, events, lock, and the lifecycle
+  // log all stay in the host repo's `.ccloop/`.
+  let state: CcloopState = (await readState(paths.state)) ?? freshState(new Date());
+  let effectiveCwd = cwd;
+  if (state.worktree) {
+    // Recover the run's worktree regardless of the current config
+    // value — once a run is started in worktree mode, every resume
+    // must keep operating in that worktree or the loop's commits
+    // would land on the wrong branch.
+    if (!existsSync(state.worktree.path)) {
+      process.stderr.write(
+        `ccloop: worktree at ${state.worktree.path} is missing; cannot resume.\n` +
+        `       Recreate it with \`git worktree add ${state.worktree.path} ${state.worktree.branch}\`, ` +
+        `or remove .ccloop/state.json's \`worktree\` field to fall back to host CWD.\n`,
+      );
+      if (release) await release();
+      return 1;
+    }
+    effectiveCwd = state.worktree.path;
+  } else if (config.loop.use_worktree && !isResume) {
+    // Fresh worktree creation. The host CWD has just been verified
+    // clean (above), so the worktree we branch off HEAD inherits a
+    // clean tree.
+    try {
+      const baseSha = await headSha(cwd);
+      const branch = await currentBranch(cwd);
+      const branchName = `ccloop/${state.run_id}`;
+      await addWorktree(cwd, paths.worktree, branchName, baseSha);
+      state.worktree = {
+        path: paths.worktree,
+        branch: branchName,
+        original_branch: branch ?? "",
+        original_base_sha: baseSha,
+      };
+      effectiveCwd = paths.worktree;
+      process.stderr.write(
+        `ccloop: working in worktree ${paths.worktree} on branch ${branchName}\n`,
+      );
+    } catch (err) {
+      process.stderr.write(`ccloop: worktree setup failed: ${(err as Error).message}\n`);
+      if (release) await release();
+      return 1;
+    }
+  }
+
+  // §10.4 recovery commit: --continue with a dirty tree means the
+  // previous instance was killed mid-step. Auto-commit whatever's
+  // there before resuming so the loop has a clean baseline. The
+  // "tree" we care about is the one driver/SDK actually operate on —
+  // the worktree when use_worktree is on, the host CWD otherwise.
+  const needsRecoveryCommit = isResume && !(await isWorkingTreeClean(effectiveCwd));
+
+  // Persist whatever fresh-state / worktree-setup did, so the driver
+  // and any concurrent state reader see a consistent file.
+  await writeState(paths.state, state);
   const bus = new EventBus<import("../loop/driver.ts").DriverEvent>();
-  const driver = new LoopDriver(cwd, paths, config, bus);
-  const state = await driver.loadOrInitState();
+  const driver = new LoopDriver(effectiveCwd, paths, config, bus);
+
+  // §11.5 instance_start. Persist as soon as state is loaded so
+  // events.jsonl carries one entry per process lifetime — lets
+  // post-mortem tools count "this run had N instances" and
+  // distinguish a single 8h session from 8 × 1h resumes.
+  const lifecycleEvents = new EventLogger(paths.events);
+  let instanceStartEmitted = false;
+  try {
+    const sha = await headSha(effectiveCwd);
+    await lifecycleEvents.append({
+      run_id: state.run_id,
+      step: state.current_step,
+      type: "instance_start",
+      ccloop_version: VERSION,
+      cwd: effectiveCwd,
+      git_sha: String(sha),
+    });
+    instanceStartEmitted = true;
+  } catch {
+    // Don't let event-log issues block startup.
+  }
 
   if (needsRecoveryCommit) {
     try {
       const r = await autoCommit(
-        cwd,
+        effectiveCwd,
         `chore(ccloop): recovery commit before resume of step ${state.current_step}`,
       );
       if (r.committed) {
         process.stderr.write(
           `ccloop: recovered dirty tree into commit ${r.sha.slice(0, 7)}.\n`,
         );
+        // Persist a durable marker. Pairs with the prior-crash
+        // detection in the recap: an unpaired instance_start tells
+        // us "prior process died"; this event tells us "and the
+        // prior process had unsaved work we picked up into commit
+        // X." Best-effort — log issues must not block resume.
+        try {
+          await lifecycleEvents.append({
+            run_id: state.run_id,
+            step: state.current_step,
+            type: "recovery_commit",
+            commit_sha: String(r.sha),
+            commit_subject: r.subject,
+          });
+        } catch {
+          // Non-fatal: recovery committed; event-log write failed.
+        }
       }
     } catch (err) {
       process.stderr.write(`ccloop: recovery commit failed: ${(err as Error).message}\n`);
@@ -162,8 +275,8 @@ export async function runRun(argv: string[]): Promise<number> {
     }
   }
 
-  const usageClient = token
-    ? new UsageClient({ token })
+  const usageClient = auth.discovered
+    ? new UsageClient({ token: auth.discovered.token })
     : null;
 
   // 8. SIGINT/SIGTERM handler — propagate via AbortController.
@@ -178,32 +291,292 @@ export async function runRun(argv: string[]): Promise<number> {
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
 
-  // 9. TUI: render via ink, ticked by the bus + 250ms timer.
-  let view: TuiViewModel = { ...EMPTY_VIEW, cwd, runId: state.run_id, step: state.current_step };
-  let recentEvents: string[] = [];
+  // 9. TUI: pure-projection render loop.
+  //
+  // The tick rebuilds the view from the current state on every fire
+  // and rerenders unconditionally. Ink's diff renderer makes a no-op
+  // rerender free; with the alt-screen + Frame fixes in place, there
+  // are no flicker concerns at 4 Hz.
+  //
+  // History: an earlier design gated rerenders on a `viewDirty` flag
+  // that bus subscribers had to set. Direct state mutations
+  // (applyEscalation, applyPause, …) emit no bus event, which left
+  // the view-update path silently divergent from the state machine
+  // for up to one heartbeat. That produced a class of bugs ("the
+  // ESCALATED screen is up but the menu keys aren't wired" being the
+  // most visible). Single source of truth — current `state` — and a
+  // single render path eliminates the class entirely.
+  // Prefill the log pane from events.jsonl so `--continue` doesn't
+  // open to a blank screen; the operator can see what happened in the
+  // prior session(s) before the next step fires. Bus events appended
+  // live take over from there.
+  //
+  // Parallelize the three startup reads — events.jsonl, recent step
+  // records, SPEC.md checklist — they're independent and the recap
+  // path needs all three. Saves measurable ms on resume; also dedupes
+  // the SPEC.md read that previously happened twice (once for recap,
+  // once for the dashboard's cached count).
+  const [priorEvents, priorStepsForRecap, initialChecklist] = await Promise.all([
+    loadRecentEvents(paths.events, LOG_CAP),
+    isResume
+      ? loadRecentSteps(paths.steps, RECENT_STEPS_CAP)
+      : Promise.resolve<import("../loop/stepRecord.ts").StepRecord[]>([]),
+    readChecklist(join(effectiveCwd, SPEC_FILENAME)),
+  ]);
+  // Structured event buffer feeds the unified Transcript pane. The
+  // projector promotes each entry to a typed visual block; the
+  // non-TTY echo path below stringifies via eventToLine for log files.
+  let logBuffer: import("../tui/types.ts").LifecycleEntry[] = priorEvents
+    .map((e) => e as import("../tui/types.ts").LifecycleEntry)
+    .filter((e) => eventToLine(e as { ts: string; type: string } & Record<string, unknown>).length > 0);
+
+  // Wake-up recap: when resuming, print a one-screen overnight summary
+  // to stderr before the alt-screen takes over. Lands in scrollback once
+  // ccloop exits, so the operator can see what happened without
+  // round-tripping to events.jsonl.
+  if (isResume) {
+    const recap = buildRecap({
+      steps: priorStepsForRecap, events: priorEvents,
+      now: new Date(), checklist: initialChecklist,
+    });
+    if (recap) process.stderr.write(recap);
+  }
+  let nowBuffer: import("../tui/types.ts").TurnEvent[] = [];
+  // Live peak input tokens for the in-flight step. Reset on
+  // step_start, walked up by usage_tick events from the driver, and
+  // passed to the projector so the context bar can advance every
+  // turn instead of only at step_end.
+  let liveStepPeakTokens = 0;
+  let heartbeat: "●" | "○" = "●";
+  let lastHeartbeatToggleMs = Date.now();
   let finalCommitSha = "";
-  let stepsDirty = true;
   let cachedRecent: import("../loop/stepRecord.ts").StepRecord[] = [];
+  let stepsDirty = true;
+  // Refreshed on step_end so the dashboard reflects whatever Claude
+  // just ticked off without polling SPEC.md every tick. Initialised
+  // from the parallel read above — no second SPEC.md read.
+  let cachedChecklist: { done: number; total: number } = initialChecklist;
+  let checklistDirty = false;
+  let interrupting = false;
+  let firstInterruptAt = 0;
+  let cadenceWait: { startedAt: string; totalMs: number } | null = null;
+  // Detached overnight runs (`nohup` or stdout redirect) hit non-TTY.
+  // The TUI is a no-op there — see the alt-screen / Ink gates below
+  // — so we instead echo each durable event line to stderr so the
+  // log file has some signal beyond the startup recap. events.jsonl
+  // remains the canonical structured surface.
+  const stdoutIsTty = Boolean(process.stdout.isTTY);
   bus.subscribe((e) => {
-    recentEvents = [...recentEvents, eventToLine(e)].slice(-12);
-    if (e.type === "step_end") stepsDirty = true;
+    if (e.type === "stream_chunk") {
+      // Mutable push: was `[...nowBuffer, e.turn]` which is O(n²)
+      // across the lifetime of a step. A heavy step can emit
+      // thousands of chunks; the spread re-allocated and copied the
+      // whole buffer on each one. Dashboard isn't memoized — it
+      // re-renders from `view` identity on every tick, not from
+      // nowContent identity — so in-place push is safe.
+      nowBuffer.push(e.turn);
+      return;
+    }
+    if (e.type === "cadence_wait_enter") {
+      cadenceWait = { startedAt: e.started_at, totalMs: e.total_ms };
+      return;
+    }
+    if (e.type === "cadence_wait_exit") {
+      cadenceWait = null;
+      return;
+    }
+    if (e.type === "step_start") {
+      nowBuffer = [];
+      liveStepPeakTokens = 0;
+    }
+    if (e.type === "usage_tick") {
+      liveStepPeakTokens = e.peak_input_tokens;
+    }
+    const line = eventToLine(e);
+    if (line) {
+      logBuffer = [...logBuffer, e as unknown as import("../tui/types.ts").LifecycleEntry].slice(-LOG_CAP);
+      if (!stdoutIsTty) process.stderr.write(line + "\n");
+    }
+    if (e.type === "step_end") { stepsDirty = true; checklistDirty = true; }
     if (e.type === "done" && "final_commit_sha" in e) {
       finalCommitSha = String(e.final_commit_sha);
     }
   });
-  const ink = render(React.createElement(Dashboard, { view }));
-  if (usageClient) void usageClient.get();
-  const usagePollTimer = usageClient ? setInterval(() => {
-    void usageClient.get();
-  }, 30_000) : null;
-  const tickTimer = setInterval(async () => {
-    if (stepsDirty) {
-      cachedRecent = await loadRecentSteps(paths.steps, 5);
-      stepsDirty = false;
+  // Closure-shared menu key handler. Set during ESCALATED /
+  // GUARDRAIL_TRIP prompts; the tick threads it through Dashboard
+  // props on every render so useMenuKey has a current handler.
+  let menuKeyHandler: ((key: MenuKey) => void) | null = null;
+  // Per-instance operator pause toggle. In-memory only — restarting
+  // ccloop resumes running. The TUI binds `p` to `pauseGate.toggle`;
+  // the orchestrator parks at the top of the next loop iteration if
+  // the gate is set.
+  const pauseGate = createPauseGate();
+  // Repaint immediately when the gate flips so the operator gets
+  // visual feedback on press, not on the next tick. Defer via
+  // setTimeout(0) — onChange fires inside Ink's useInput handler
+  // and rerendering inside the same React render call stack is
+  // unsafe.
+  pauseGate.onChange(() => {
+    if (stdoutIsTty) setTimeout(() => renderNow(true), 0);
+  });
+  const onInterrupt = (): void => {
+    const now = Date.now();
+    if (interrupting && now - firstInterruptAt < FORCE_EXIT_WINDOW_MS) {
+      // Second press within the grace window — give up on graceful
+      // shutdown. Restore terminal and bail.
+      ink?.unmount();
+      leaveAltScreen();
+      process.exit(130);
     }
-    view = buildView(state, cwd, usageClient, recentEvents, cachedRecent, finalCommitSha);
-    ink.rerender(React.createElement(Dashboard, { view }));
-  }, TUI_TICK_MS);
+    interrupting = true;
+    firstInterruptAt = now;
+    aborter.abort();
+  };
+
+  let view: TuiViewModel = { ...EMPTY_VIEW, cwd, runId: state.run_id, step: state.current_step };
+  // Detached overnight runs (`nohup ccloop run > log.txt 2>&1 &` or
+  // CI) hit a non-TTY stdout. Skip the entire TUI in that mode —
+  // Ink would otherwise repaint the dashboard frame to the log file
+  // 4× per second. events.jsonl + the wake-up recap are the durable
+  // surfaces in non-TTY; escalation/guardrail-trip auto-quit since
+  // there's no way to read menu keys without raw mode.
+  const enterAltScreen = (): void => {
+    if (stdoutIsTty) process.stdout.write("\x1b[?1049h\x1b[?25l");
+  };
+  const leaveAltScreen = (): void => {
+    if (stdoutIsTty) process.stdout.write("\x1b[?25h\x1b[?1049l");
+  };
+  enterAltScreen();
+  process.on("exit", leaveAltScreen);
+
+  const ink = stdoutIsTty
+    ? render(React.createElement(Dashboard, {
+        view, onInterrupt,
+        onTogglePause: () => { pauseGate.toggle(); },
+      }), {
+        exitOnCtrlC: false,
+        // Ink 6 flicker mitigations:
+        //  - incrementalRendering: only emit ANSI for changed lines
+        //    instead of clear+rewrite of the whole frame region. This
+        //    is the primary fix for the flicker we saw on non-change
+        //    ticks; combined with the synchronized-output protocol
+        //    (DEC mode 2026, automatic in supporting terminals) the
+        //    frame swap becomes atomic.
+        //  - concurrent: opt into React 19's concurrent rendering;
+        //    enables future use of useDeferredValue / useTransition
+        //    for streaming work. Has no immediate behavioral effect
+        //    here but makes the renderer interruptible.
+        //  - maxFps: defaults to 30 already; explicit so the cap is
+        //    visible at the call site. Our tick is 10Hz plus a
+        //    skip-if-unchanged guard, well under the cap.
+        incrementalRendering: true,
+        concurrent: true,
+        maxFps: 30,
+      })
+    : null;
+  // Ink writes the full frame on every rerender() call regardless of
+  // whether the output bytes actually differ — each write is a
+  // clear+rewrite of the frame region, which is what shows up as
+  // flicker. The signature collapses idle ticks (only Date.now()
+  // changed) to zero paints. Quantize anything time-derived to its
+  // visible granularity (1s for heartbeat / countdown / elapsed) so
+  // sub-second ticks don't bust the cache.
+  let lastSig = "";
+  const renderNow = (force = false): void => {
+    if (!ink) return;
+    view = buildView(
+      state, cwd, usageClient, logBuffer, nowBuffer, heartbeat,
+      cachedRecent, finalCommitSha,
+      undefined, interrupting, cadenceWait, cachedChecklist,
+      pauseGate.isPaused(),
+      config.claude.model,
+      liveStepPeakTokens,
+    );
+    if (!force) {
+      const cadenceS = view.cadenceWait
+        ? Math.floor((Date.now() - Date.parse(view.cadenceWait.startedAt)) / 1000)
+        : -1;
+      const sig = [
+        view.state, view.step, view.heartbeat,
+        view.transcript.length,
+        Math.floor(view.elapsedMs / 1000),
+        cadenceS,
+        view.usage?.five_hour.utilization ?? "",
+        view.usage?.seven_day.utilization ?? "",
+        view.checklist ? `${view.checklist.done}/${view.checklist.total}` : "",
+        view.rollingCostUsd.toFixed(4),
+        view.rollingTokensIn, view.rollingTokensOut,
+        view.averageCacheHitRate.toFixed(3), view.cacheLowStreak,
+        view.lastContextTokens, view.contextWindowTokens,
+        view.focus, view.interrupting,
+        view.pause?.reason ?? "", view.pause?.until ?? "",
+        view.escalation?.reason ?? "",
+        view.guardrail?.which ?? "", view.guardrail?.actual ?? "",
+        view.done?.finalCommitSha ?? "",
+        menuKeyHandler ? 1 : 0,
+      ].join("|");
+      if (sig === lastSig) return;
+      lastSig = sig;
+    }
+    ink.rerender(React.createElement(Dashboard, {
+      view, onMenuKey: menuKeyHandler ?? undefined, onInterrupt,
+      onTogglePause: () => { pauseGate.toggle(); },
+    }));
+  };
+  if (usageClient) void usageClient.get();
+  const usagePollTimer = usageClient
+    ? setInterval(() => { void usageClient.get(); }, 30_000)
+    : null;
+  const tickTimer = stdoutIsTty
+    ? setInterval(async () => {
+        if (stepsDirty) {
+          cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
+          stepsDirty = false;
+        }
+        if (checklistDirty) {
+          cachedChecklist = await readChecklist(join(effectiveCwd, SPEC_FILENAME));
+          checklistDirty = false;
+        }
+        const now = Date.now();
+        if (now - lastHeartbeatToggleMs >= HEARTBEAT_INTERVAL_MS) {
+          heartbeat = heartbeat === "●" ? "○" : "●";
+          lastHeartbeatToggleMs = now;
+        }
+        renderNow();
+      }, TUI_TICK_MS)
+    : null;
+
+  const readMenuKey = (
+    allowed: ReadonlyArray<MenuKey>,
+    abortSignal: AbortSignal,
+  ): Promise<MenuKey> => {
+    // Non-TTY can't read menu keys (no raw mode). Auto-quit so the
+    // run terminates cleanly with the relevant exit code; the
+    // operator resumes via `--continue` after addressing the cause.
+    if (!ink) return Promise.resolve<MenuKey>("q");
+    return new Promise<MenuKey>((resolve) => {
+      let settled = false;
+      const finish = (k: MenuKey) => {
+        if (settled) return;
+        settled = true;
+        menuKeyHandler = null;
+        abortSignal.removeEventListener("abort", onAbort);
+        resolve(k);
+      };
+      const onAbort = () => finish("q");
+      menuKeyHandler = (k) => {
+        if (allowed.includes(k)) finish(k);
+      };
+      // Force an immediate paint with the new handler attached so
+      // the user doesn't wait up to one tick for the menu to become
+      // responsive. State has already mutated upstream — renderNow
+      // reads `state` fresh, so the correct screen + handler land
+      // in a single rerender.
+      renderNow(true);
+      if (abortSignal.aborted) return finish("q");
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
 
   // 10. Drive the loop, handling escalation cycles.
   let exitCode = 0;
@@ -214,15 +587,41 @@ export async function runRun(argv: string[]): Promise<number> {
         config, paths, driver, bus, abortSignal: aborter.signal,
         usage: usageClient,
         notifyOptions: { pushUrl: config.notify.push_url, webhookUrl: config.notify.webhook_url },
+        heartbeatUrl: config.notify.heartbeat_url,
+        pauseGate,
       });
-      if (outcome.kind === "done") { exitCode = 0; resolved = true; }
-      else if (outcome.kind === "guardrail_trip") { exitCode = 4; resolved = true; }
+      if (outcome.kind === "done") {
+        exitCode = 0;
+        resolved = true;
+        if (state.worktree) {
+          await finalizeWorktreeOnDone(state, cwd, lifecycleEvents);
+        }
+      }
+      else if (outcome.kind === "guardrail_trip") {
+        await handleGuardrailTrip(cwd, aborter.signal, readMenuKey);
+        exitCode = 4;
+        resolved = true;
+      }
       else if (outcome.kind === "cancelled") {
         exitCode = exitSignalCode || 130;
         resolved = true;
       }
       else if (outcome.kind === "escalated") {
-        const action = await handleEscalation(state, paths, cwd, aborter.signal);
+        const action = await handleEscalation(state, paths, effectiveCwd, aborter.signal, readMenuKey);
+        // Audit trail: record what the operator did at the menu so a
+        // post-mortem (or the wake-up recap) can answer "what
+        // recovery action did I take at 2am?" without inferring from
+        // git log + state diffs. Best-effort.
+        try {
+          await lifecycleEvents.append({
+            run_id: state.run_id,
+            step: state.current_step,
+            type: "escalation_resolved",
+            action,
+          });
+        } catch {
+          // Non-fatal.
+        }
         if (action === "quit") { exitCode = 5; resolved = true; }
         // continue / revert / edit_spec → loop again with reset state
       }
@@ -231,17 +630,141 @@ export async function runRun(argv: string[]): Promise<number> {
     process.stderr.write(`\nccloop: fatal error: ${(err as Error).message}\n`);
     exitCode = 1;
   } finally {
-    clearInterval(tickTimer);
+    if (tickTimer) clearInterval(tickTimer);
     if (usagePollTimer) clearInterval(usagePollTimer);
-    cachedRecent = await loadRecentSteps(paths.steps, 5);
-    view = buildView(state, cwd, usageClient, recentEvents, cachedRecent, finalCommitSha);
-    ink.rerender(React.createElement(Dashboard, { view }));
-    ink.unmount();
+    if (ink) {
+      cachedRecent = await loadRecentSteps(paths.steps, RECENT_STEPS_CAP);
+      menuKeyHandler = null; // suppress key wiring on the final paint
+      renderNow(true);
+      ink.unmount();
+    }
+    leaveAltScreen();
+    process.off("exit", leaveAltScreen);
     process.off("SIGINT", onSigInt);
     process.off("SIGTERM", onSigTerm);
     if (release) await release();
+    // §11.5 instance_exit. Best-effort — don't let log-write
+    // failures change the exit code that the user actually cares
+    // about. The reason field is the dominant outcome from runLoop;
+    // a fatal error path that didn't go through runLoop falls back
+    // to "fatal_error".
+    if (instanceStartEmitted) {
+      try {
+        await lifecycleEvents.append({
+          run_id: state.run_id,
+          step: state.current_step,
+          type: "instance_exit",
+          reason: exitReasonFromCode(exitCode),
+          exit_code: exitCode,
+        });
+      } catch {
+        // Best-effort.
+      }
+    }
   }
   return exitCode;
+}
+
+function exitReasonFromCode(code: number): string {
+  // Mirror the SPEC §12.6 / §0 exit-code table in human-readable form.
+  switch (code) {
+    case 0: return "done";
+    case 1: return "fatal_error";
+    case 2: return "auth_missing";
+    case 3: return "lock_held";
+    case 4: return "guardrail_trip";
+    case 5: return "escalated";
+    case 130: return "sigint";
+    case 143: return "sigterm";
+    default: return `exit_${code}`;
+  }
+}
+
+async function readChecklist(specPath: string): Promise<{ done: number; total: number }> {
+  try {
+    const text = await readFile(specPath, "utf8");
+    return parseChecklist(text);
+  } catch {
+    return { done: 0, total: 0 };
+  }
+}
+
+/** Reattach the worktree's commits onto the user's branch, fast-forward
+ *  only. On success the worktree is removed and the run-local branch
+ *  deleted; the user is left with a clean repo on their original branch
+ *  with the loop's commits at HEAD. On failure (branch moved, FF not
+ *  possible, detached HEAD at start, etc.) the worktree is preserved so
+ *  the user can merge manually. */
+type WorktreeFinalizedOutcome = "merged" | "ff_failed" | "skipped";
+
+async function finalizeWorktreeOnDone(
+  state: CcloopState,
+  hostCwd: string,
+  events: EventLogger,
+): Promise<void> {
+  const wt = state.worktree;
+  if (!wt) return;
+  const tipSha = await headSha(wt.path);
+  const target = wt.original_branch;
+  const shortTip = String(tipSha).slice(0, 7);
+
+  const emit = (
+    outcome: WorktreeFinalizedOutcome,
+    reason: string,
+  ): Promise<void> =>
+    appendBest(events, {
+      run_id: state.run_id, step: state.current_step,
+      type: "worktree_finalized", outcome, reason,
+      branch: wt.branch, target_branch: target, tip_sha: String(tipSha),
+    });
+
+  if (!target) {
+    process.stderr.write(
+      `ccloop: started in detached HEAD; loop commits live on branch ${wt.branch} ` +
+      `at ${shortTip}. Worktree retained at ${wt.path}.\n`,
+    );
+    await emit("skipped", "detached HEAD at run start");
+    return;
+  }
+
+  const ff = await tryFastForward(hostCwd, target, tipSha, wt.original_base_sha);
+  if (!ff.ok) {
+    process.stderr.write(
+      `ccloop: cannot fast-forward ${target}: ${ff.reason}.\n` +
+      `        Worktree retained at ${wt.path}; merge manually with ` +
+      `\`git merge ${wt.branch}\` from ${target}.\n`,
+    );
+    await emit("ff_failed", ff.reason);
+    return;
+  }
+
+  let cleanupNote = "";
+  try {
+    await removeWorktree(hostCwd, wt.path);
+  } catch (err) {
+    cleanupNote = ` (worktree-remove warning: ${(err as Error).message})`;
+  }
+  try {
+    await deleteBranch(hostCwd, wt.branch);
+  } catch (err) {
+    cleanupNote += ` (branch-delete warning: ${(err as Error).message})`;
+  }
+  // Some git versions leave the worktree dir behind after a forced
+  // remove if files were created outside git's awareness; rm it so a
+  // subsequent fresh run can recreate it without tripping.
+  try { await rm(wt.path, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  process.stderr.write(
+    `ccloop: fast-forwarded ${target} to ${shortTip}.${cleanupNote}\n`,
+  );
+  await emit("merged", "");
+}
+
+async function appendBest(
+  events: EventLogger,
+  payload: Parameters<EventLogger["append"]>[0],
+): Promise<void> {
+  try { await events.append(payload); } catch { /* best-effort */ }
 }
 
 async function isCwdGreenfield(cwd: string): Promise<boolean> {
@@ -256,18 +779,125 @@ async function isCwdGreenfield(cwd: string): Promise<boolean> {
   return true;
 }
 
+/** Format a bus event into a one-line log entry for the log pane.
+ *  Returning empty string suppresses the entry entirely. */
 function eventToLine(e: { ts: string; type: string } & Record<string, unknown>): string {
-  const t = e.ts.replace("T", " ").replace(/\.\d+Z$/, "Z");
-  return `${t}  ${e.type}`;
+  const t = e.ts.replace("T", " ").replace(/T?\.\d+Z$/, "Z").slice(11, 19);
+  switch (e.type) {
+    case "step_start":
+      return `${t}  step ${e.step} started`;
+    case "step_end": {
+      const subtype = String(e.subtype ?? "");
+      const dur = formatDurationShort(numberOr(e.duration_ms, 0));
+      const cost = `$${numberOr(e.cost_usd, 0).toFixed(2)}`;
+      const sha = String(e.commit_sha ?? "").slice(0, 7);
+      const out = String(e.outcome ?? subtype);
+      // Use the text-style check / cross (✓ / ✗) rather than ✔ / ✘:
+      // the latter are sometimes auto-promoted to emoji presentation
+      // by the terminal (rendering as 2 columns) while string-width
+      // counts them as 1 — that mismatch shifts everything after the
+      // mark by a column.
+      const mark = out === "success" ? "✓" : out === "failure" ? "✗" : "·";
+      const subj = String(e.commit_subject ?? "").trim();
+      const subjPart = subj ? ` · ${subj}` : "";
+      return `${t}  step ${e.step} ${mark} ${dur} · ${cost}${sha ? ` · ${sha}` : ""}${subjPart}`;
+    }
+    case "step_failed":
+      return `${t}  step ${e.step} failed: ${String(e.category ?? "unknown")}`;
+    case "pause_enter":
+      return `${t}  pause: ${String(e.reason ?? "")} (${String(e.window ?? "")})`;
+    case "pause_exit":
+      return `${t}  resume: ${String(e.wake_reason ?? "")}`;
+    case "operator_pause_enter":
+      return `${t}  pause: operator`;
+    case "operator_pause_exit":
+      return `${t}  resume: operator`;
+    case "escalate":
+      return `${t}  escalate: ${String(e.reason ?? "")}`;
+    case "guardrail_trip":
+      return `${t}  guardrail: ${String(e.which ?? "")} = ${String(e.actual ?? "")}`;
+    case "usage_degraded":
+      return `${t}  usage degraded: ${String(e.reason ?? "")}`;
+    case "cache_warning": {
+      const rate = (numberOr(e.rate, 0) * 100).toFixed(0);
+      return `${t}  cache hit rate ${rate}% for ${numberOr(e.streak, 0)} steps in a row`;
+    }
+    case "notification_sent": {
+      const channel = String(e.channel ?? "?");
+      const ok = e.ok === true;
+      const status = e.status === null || e.status === undefined ? "—" : String(e.status);
+      const detail = ok ? `ok (${status})` : `failed (${e.error ?? status})`;
+      return `${t}  notify ${channel}: ${detail}`;
+    }
+    case "instance_start": {
+      const v = e.ccloop_version ? `v${e.ccloop_version}` : "";
+      const sha = String(e.git_sha ?? "").slice(0, 7);
+      const tail = [v, sha ? `@${sha}` : ""].filter(Boolean).join(" ");
+      return `${t}  instance start${tail ? ` · ${tail}` : ""}`;
+    }
+    case "instance_exit":
+      return `${t}  instance exit · ${String(e.reason ?? "?")} (exit ${e.exit_code ?? "?"})`;
+    case "recovery_commit": {
+      const sha = String(e.commit_sha ?? "").slice(0, 7);
+      const subj = String(e.commit_subject ?? "").trim();
+      const tail = subj ? ` · ${subj}` : "";
+      return `${t}  recovery commit ${sha}${tail}`;
+    }
+    case "escalation_resolved":
+      return `${t}  escalation resolved · ${String(e.action ?? "?")}`;
+    case "worktree_finalized": {
+      const outcome = String(e.outcome ?? "?");
+      const target = String(e.target_branch ?? "");
+      const tip = String(e.tip_sha ?? "").slice(0, 7);
+      if (outcome === "merged") {
+        return `${t}  worktree merged → ${target}${tip ? ` @ ${tip}` : ""}`;
+      }
+      if (outcome === "ff_failed") {
+        return `${t}  worktree retained · cannot fast-forward ${target}: ${String(e.reason ?? "")}`;
+      }
+      return `${t}  worktree retained · ${String(e.reason ?? outcome)}`;
+    }
+    case "session_rotated": {
+      const prev = String(e.previous_session_id ?? "");
+      const prevTail = prev ? ` (was ${prev.slice(0, 8)})` : "";
+      const reason = String(e.reason ?? "?");
+      const tokTail = e.reason === "context_threshold" && e.context_tokens && e.context_window
+        ? ` · ${numberOr(e.context_tokens, 0)}/${numberOr(e.context_window, 0)} tokens`
+        : "";
+      return `${t}  session rotated · ${reason}${tokTail}${prevTail}`;
+    }
+    case "done":
+      return `${t}  done · ${String(e.final_commit_sha ?? "").slice(0, 7)}`;
+    default:
+      return "";
+  }
 }
+
+function numberOr(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+function formatDurationShort(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}m${String(r).padStart(2, "0")}s`;
+}
+
+type EscalationOutcome = "continue" | "revert" | "edit_spec" | "quit";
 
 async function handleEscalation(
   state: CcloopState,
   paths: ReturnType<typeof runtimePaths>,
   cwd: string,
   abortSignal: AbortSignal,
-): Promise<"continue" | "quit"> {
-  const key = await readSingleKey(["c", "r", "e", "q"], abortSignal);
+  readMenuKey: (
+    allowed: ReadonlyArray<MenuKey>,
+    abortSignal: AbortSignal,
+  ) => Promise<MenuKey>,
+): Promise<EscalationOutcome> {
+  const key = await readMenuKey(["c", "r", "e", "q"], abortSignal);
   if (abortSignal.aborted) return "quit";
   const lastGreen = await findLastGreenSha(paths.steps);
   const action = decideEscalationKey(key, state, lastGreen);
@@ -286,8 +916,9 @@ async function handleEscalation(
         return "quit";
       }
       resetForContinue(state);
+      clearSessionForReorientation(state);
       await writeState(paths.state, state);
-      return "continue";
+      return "revert";
     case "edit_spec": {
       const editor = process.env.EDITOR || process.env.VISUAL || "vi";
       const r = spawnSync(editor, [join(cwd, SPEC_FILENAME)], { stdio: "inherit" });
@@ -296,19 +927,55 @@ async function handleEscalation(
         return "quit";
       }
       resetForContinue(state);
+      clearSessionForReorientation(state);
       await writeState(paths.state, state);
-      return "continue";
+      return "edit_spec";
     }
   }
+}
+
+/**
+ * §10.5 — guardrail-trip terminal screen. `q` quits; `e` opens the
+ * editor on `ccloop.toml` so the user can raise the limit, then exits
+ * so they can resume with `ccloop run --continue`.
+ */
+async function handleGuardrailTrip(
+  cwd: string,
+  abortSignal: AbortSignal,
+  readMenuKey: (
+    allowed: ReadonlyArray<MenuKey>,
+    abortSignal: AbortSignal,
+  ) => Promise<MenuKey>,
+): Promise<void> {
+  const key = await readMenuKey(["q", "e"], abortSignal);
+  if (abortSignal.aborted || key === "q") return;
+  const editor = process.env.EDITOR || process.env.VISUAL || "vi";
+  const r = spawnSync(editor, [join(cwd, CONFIG_FILENAME)], { stdio: "inherit" });
+  if (r.status !== 0) {
+    process.stderr.write(`\nccloop: editor exited ${r.status}.\n`);
+    return;
+  }
+  process.stderr.write(
+    `\nccloop: ${CONFIG_FILENAME} edited. Resume with \`ccloop run --continue\`.\n`,
+  );
 }
 
 function buildView(
   state: CcloopState,
   cwd: string,
   usage: UsageClient | null,
-  events: string[],
+  events: import("../tui/types.ts").LifecycleEntry[],
+  nowContent: import("../tui/types.ts").TurnEvent[],
+  heartbeat: "●" | "○",
   recent: import("../loop/stepRecord.ts").StepRecord[],
   finalCommitSha: string,
+  focus: import("../tui/types.ts").FocusTarget = "transcript",
+  interrupting = false,
+  cadenceWait: { startedAt: string; totalMs: number } | null = null,
+  checklist: { done: number; total: number } | null = null,
+  operatorPaused = false,
+  model = "",
+  liveStepPeakTokens = 0,
 ): TuiViewModel {
   const snapshot = usage?.lastSnapshot() ?? null;
   return project({
@@ -317,7 +984,16 @@ function buildView(
     usage: snapshot,
     recent,
     events,
+    nowContent,
+    focus,
+    heartbeat,
+    interrupting,
+    cadenceWait,
+    checklist,
     now: new Date(),
     finalCommitSha,
+    operatorPaused,
+    model,
+    liveStepPeakTokens,
   });
 }

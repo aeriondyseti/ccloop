@@ -5,17 +5,55 @@
 import type { UsageSnapshot } from "../usage/client.ts";
 
 export type TuiState =
-  | "STARTING" | "RUNNING" | "PAUSED" | "ESCALATED"
-  | "GUARDRAIL_TRIP" | "DONE";
+  | "STARTING" | "RUNNING" | "PAUSED" | "OPERATOR_PAUSED"
+  | "ESCALATED" | "GUARDRAIL_TRIP" | "DONE";
 
-export interface TuiStepSummary {
-  step: number;
-  outcome: "success" | "failure" | "no-op";
-  cost_usd: number;
-  duration_ms: number;
-  cache_hit_rate: number;
-  commit_subject: string;
+/**
+ * One entry in the live SDK turn stream. Emitted by the driver as the
+ * Agent SDK streams; merged into the unified transcript.
+ */
+export type TurnEvent =
+  | { kind: "turn_start"; turn: number; ts: string }
+  | { kind: "assistant_text"; text: string; ts: string }
+  | { kind: "thinking"; text: string; ts: string }
+  | { kind: "tool_use"; tool: string; summary: string; ts: string }
+  | { kind: "tool_result"; tool: string; ok: boolean; excerpt: string; ts: string }
+  | { kind: "todo_state"; todos: TodoItem[]; ts: string }
+  | { kind: "idle"; ts: string; note: string };
+
+/** Snapshot of one entry in Claude's TodoWrite tool. The agent
+ *  maintains this list internally as its working plan; surfacing it
+ *  in the TUI lets the operator see what Claude *thinks* it's doing
+ *  vs. the static SPEC.md checklist. */
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  activeForm?: string;
 }
+
+/** A durable lifecycle event from events.jsonl — promoted into a
+ *  transcript entry so the unified pane can render it as a typed
+ *  block instead of a pre-formatted string. The shape mirrors
+ *  `EventBase` from src/state/events.ts but kept structural here so
+ *  the TUI doesn't import state types. */
+export interface LifecycleEntry {
+  ts: string;
+  type: string;
+  step?: number;
+  [k: string]: unknown;
+}
+
+/** Single chronological surface that replaces the old log + now
+ *  panes. `lifecycle` carries durable events (step_start, escalate,
+ *  pause, etc.); `turn` carries live SDK turn events for the current
+ *  step. The renderer interleaves them in arrival order. */
+export type TranscriptEntry =
+  | { source: "lifecycle"; ts: string; entry: LifecycleEntry }
+  | { source: "turn"; ts: string; entry: TurnEvent };
+
+/** Single scroll target now that log and now are merged. Kept as a
+ *  union for forward-compat / test ergonomics. */
+export type FocusTarget = "transcript";
 
 export interface TuiViewModel {
   state: TuiState;
@@ -29,14 +67,53 @@ export interface TuiViewModel {
   rollingTokensIn: number;
   rollingTokensOut: number;
   averageCacheHitRate: number;
-  recentSteps: TuiStepSummary[];
-  events: string[];                       // pre-formatted lines
+  /** Number of consecutive recent steps below the cache-hit-rate
+   *  threshold (per SPEC §11). Renderer can surface ≥3 as a yellow
+   *  flag — that's the same point at which the cache_warning event
+   *  fires. 0 when healthy. */
+  cacheLowStreak: number;
+  /** Most recent step's input-side context size — input_tokens +
+   *  cache_read + cache_creation. Approximates the prefix that was
+   *  sent on the last assistant call; the next step starts from a
+   *  similar baseline since the SDK resumes the same session until
+   *  rotation. 0 when no step has reported usage yet. */
+  lastContextTokens: number;
+  /** Effective context window for the active model. Used as the
+   *  denominator for the context-utilization bar. Defaults to 200K
+   *  for Sonnet / Opus; 1M when the model id contains "1m". */
+  contextWindowTokens: number;
+  /** Unified transcript: lifecycle events + live turn stream merged
+   *  in chronological order. Replaces the old log/now split. */
+  transcript: TranscriptEntry[];
+  /** Which scrollable pane has keyboard focus. Single target since
+   *  log and now were merged; retained for the focus-cycle hook. */
+  focus: FocusTarget;
+  /** Toggles each tick so users see the loop is alive. */
+  heartbeat: "●" | "○";
+  /** True after a Ctrl+C arrives — flips the controls hint to a
+   *  "stopping… press again to force-exit" message. */
+  interrupting: boolean;
+  /** When non-null, the loop is sleeping between steps (cadence wait).
+   *  Header renders an X/Y s countdown computed from these. */
+  cadenceWait: { startedAt: string; totalMs: number } | null;
   pause: { until: string; reason: string } | null;
   escalation: { reason: string } | null;
   guardrail: { which: string; limit: unknown; actual: unknown } | null;
   done: { finalCommitSha: string } | null;
   /** Static line of single-key controls per current state. */
   controlsHint: string;
+  /** SPEC.md `- [ ]` / `- [x]` checklist progress. `null` when the
+   *  spec has no items (or hasn't been read yet). Surfaced in the
+   *  header so an operator can see "12/47 done" at a glance — the
+   *  template promises this and overnight runs need it most. */
+  checklist: { done: number; total: number } | null;
+  /** Latest snapshot of Claude's TodoWrite list. Live during the
+   *  current step; the agent keeps writing it as its mental plan
+   *  evolves. Empty array when the step hasn't called TodoWrite yet
+   *  (or doesn't use it). Distinct from `checklist` — the SPEC
+   *  checklist is the user's static target; this is the agent's
+   *  in-flight working plan. */
+  claudeTodos: TodoItem[];
 }
 
 export const EMPTY_VIEW: TuiViewModel = {
@@ -51,11 +128,19 @@ export const EMPTY_VIEW: TuiViewModel = {
   rollingTokensIn: 0,
   rollingTokensOut: 0,
   averageCacheHitRate: 0,
-  recentSteps: [],
-  events: [],
+  cacheLowStreak: 0,
+  lastContextTokens: 0,
+  contextWindowTokens: 200_000,
+  transcript: [],
+  focus: "transcript",
+  heartbeat: "●",
+  interrupting: false,
+  cadenceWait: null,
   pause: null,
   escalation: null,
   guardrail: null,
   done: null,
   controlsHint: "ctrl-c quit",
+  checklist: null,
+  claudeTodos: [],
 };

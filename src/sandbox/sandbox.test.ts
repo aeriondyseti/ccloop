@@ -37,7 +37,17 @@ describe("wrapBash", () => {
     expect(r.kind).toBe("wrap");
     if (r.kind === "wrap") {
       expect(r.command).toContain("bwrap");
-      expect(r.command).toContain("--unshare-net");
+      // Network is intentionally NOT unshared — `bun install`, `npm
+      // install`, `go mod download`, etc. need internet.
+      expect(r.command).not.toContain("--unshare-net");
+      // Whole rootfs ro-bound so user toolchains anywhere on disk
+      // (mise, ~/.bun, /opt/homebrew, etc.) resolve. CWD bind comes
+      // after so writes inside the project override the ro-bind.
+      expect(r.command).toContain("--ro-bind / /");
+      const rootIdx = r.command.indexOf("--ro-bind / /");
+      const cwdIdx = r.command.indexOf("--bind '/x' '/x'");
+      expect(rootIdx).toBeGreaterThan(-1);
+      expect(cwdIdx).toBeGreaterThan(rootIdx);
       expect(r.command).toContain("'ls'");
     }
   });
@@ -69,12 +79,39 @@ describe("wrapBash", () => {
   });
 });
 
-describe("makeApprover", () => {
+/** Build a PreToolUse hook input shaped like what the SDK gives us. */
+function preToolUseInput(toolName: string, toolInput: Record<string, unknown>) {
+  return {
+    hook_event_name: "PreToolUse" as const,
+    tool_name: toolName,
+    tool_input: toolInput,
+    tool_use_id: "tu_test",
+    cwd: "/x",
+    session_id: "s",
+    transcript_path: "/x/.claude/transcript.jsonl",
+  };
+}
+
+const HOOK_OPTS = { signal: new AbortController().signal };
+
+/** Pull the PreToolUse-shaped sub-output regardless of which union arm we got. */
+function specific(out: unknown): {
+  permissionDecision?: "allow" | "deny" | "ask";
+  permissionDecisionReason?: string;
+  updatedInput?: Record<string, unknown>;
+} {
+  if (!out || typeof out !== "object") return {};
+  const o = out as Record<string, unknown>;
+  const hs = o.hookSpecificOutput as Record<string, unknown> | undefined;
+  return (hs ?? {}) as ReturnType<typeof specific>;
+}
+
+describe("makeApprover (PreToolUse hook)", () => {
   test("yolo allows everything unchanged", async () => {
     const approve = makeApprover({ yoloMode: true, cwd: "/x" });
-    const r = await approve("Bash", { command: "rm -rf /" });
-    expect(r.behavior).toBe("allow");
-    if (r.behavior === "allow") expect(r.updatedInput.command).toBe("rm -rf /");
+    const out = await approve(preToolUseInput("Bash", { command: "rm -rf /" }), undefined, HOOK_OPTS);
+    expect(specific(out).permissionDecision).toBe("allow");
+    expect(specific(out).updatedInput).toBeUndefined();
   });
 
   test("non-yolo Bash gets wrapped on linux+bwrap", async () => {
@@ -82,11 +119,9 @@ describe("makeApprover", () => {
       yoloMode: false, cwd: "/x", platform: "linux",
       hasBin: (p) => p === "/usr/bin/bwrap",
     });
-    const r = await approve("Bash", { command: "ls" });
-    expect(r.behavior).toBe("allow");
-    if (r.behavior === "allow") {
-      expect(String(r.updatedInput.command)).toContain("bwrap");
-    }
+    const out = await approve(preToolUseInput("Bash", { command: "ls" }), undefined, HOOK_OPTS);
+    expect(specific(out).permissionDecision).toBe("allow");
+    expect(String(specific(out).updatedInput?.command)).toContain("bwrap");
   });
 
   test("non-yolo Bash blocked by denylist", async () => {
@@ -94,24 +129,62 @@ describe("makeApprover", () => {
       yoloMode: false, cwd: "/x", platform: "linux",
       hasBin: () => true,
     });
-    const r = await approve("Bash", { command: "sudo halt" });
-    expect(r.behavior).toBe("deny");
+    const out = await approve(preToolUseInput("Bash", { command: "sudo halt" }), undefined, HOOK_OPTS);
+    expect(specific(out).permissionDecision).toBe("deny");
+    expect(specific(out).permissionDecisionReason).toMatch(/sudo/);
   });
 
   test("non-bash tools allowed unchanged", async () => {
     const approve = makeApprover({
       yoloMode: false, cwd: "/x", platform: "linux", hasBin: () => true,
     });
-    const r = await approve("Read", { path: "/x/foo" });
-    expect(r.behavior).toBe("allow");
-    if (r.behavior === "allow") expect(r.updatedInput.path).toBe("/x/foo");
+    const out = await approve(preToolUseInput("Read", { file_path: "/x/foo" }), undefined, HOOK_OPTS);
+    expect(specific(out).permissionDecision).toBe("allow");
+    expect(specific(out).updatedInput).toBeUndefined();
   });
 
-  test("missing bwrap on linux denies", async () => {
+  test("edit tools allowed unchanged — cwd already scopes them", async () => {
+    const approve = makeApprover({
+      yoloMode: false, cwd: "/x", platform: "darwin",
+    });
+    for (const tool of ["Edit", "Write", "NotebookEdit", "MultiEdit"]) {
+      const out = await approve(
+        preToolUseInput(tool, { file_path: "/x/f", content: "c" }),
+        undefined, HOOK_OPTS,
+      );
+      expect(specific(out).permissionDecision).toBe("allow");
+      expect(specific(out).updatedInput).toBeUndefined();
+    }
+  });
+
+  test("missing bwrap on linux denies with explanation", async () => {
     const approve = makeApprover({
       yoloMode: false, cwd: "/x", platform: "linux", hasBin: () => false,
     });
-    const r = await approve("Bash", { command: "ls" });
-    expect(r.behavior).toBe("deny");
+    const out = await approve(preToolUseInput("Bash", { command: "ls" }), undefined, HOOK_OPTS);
+    expect(specific(out).permissionDecision).toBe("deny");
+    expect(specific(out).permissionDecisionReason).toMatch(/bwrap/);
+  });
+
+  test("Bash with shell operators / heredocs is allowed (wrapped) — the CLI's own pre-check is bypassed by the hook", async () => {
+    const approve = makeApprover({
+      yoloMode: false, cwd: "/x", platform: "darwin",
+    });
+    const out = await approve(
+      preToolUseInput("Bash", { command: "cat <<'EOF' > package.json\n{}\nEOF" }),
+      undefined, HOOK_OPTS,
+    );
+    expect(specific(out).permissionDecision).toBe("allow");
+    expect(String(specific(out).updatedInput?.command)).toContain("sandbox-exec");
+  });
+
+  test("non-PreToolUse events pass through without a decision", async () => {
+    const approve = makeApprover({ yoloMode: false, cwd: "/x", platform: "darwin" });
+    const out = await approve(
+      // @ts-expect-error — synthetic PostToolUse-shaped input for the test
+      { hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: {}, tool_use_id: "x" },
+      undefined, HOOK_OPTS,
+    );
+    expect(specific(out).permissionDecision).toBeUndefined();
   });
 });

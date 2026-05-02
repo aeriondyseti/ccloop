@@ -26,6 +26,18 @@ export interface StepUsage {
   output_tokens: number;
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
+  /** Peak input-side token count observed for any single API call
+   *  within this step (`input_tokens + cache_read + cache_creation`
+   *  on the heaviest assistant message). Approximates the prompt
+   *  prefix size at its worst moment — the actual context the model
+   *  saw on one inference. The other fields are sums across all
+   *  inferences in the step, which inflate dramatically with turn
+   *  count (a 200K prefix re-read 20 times reports 4M). Use this for
+   *  context-window utilization decisions; use the sums for
+   *  cumulative billing. Optional for back-compat with step records
+   *  written before this field existed; consumers should fall back
+   *  to the sum (`inputContextTokens`). */
+  peak_input_tokens?: number;
 }
 
 export interface StepResult {
@@ -42,6 +54,12 @@ export interface StepResult {
   final_text: string;
   /** Concatenated error messages on the failure path. */
   errors: string[];
+  /** True when the SDK's terminal `result` message had `is_error: true`.
+   *  The SDK can return `subtype: "success"` with `is_error: true` for
+   *  cases like "Prompt is too long" — a synthetic assistant message
+   *  the SDK fabricates when the API rejects the request at init time.
+   *  classifyStep uses this to detect failures the subtype alone hides. */
+  is_error: boolean;
 }
 
 export function emptyUsage(): StepUsage {
@@ -50,11 +68,36 @@ export function emptyUsage(): StepUsage {
     output_tokens: 0,
     cache_read_input_tokens: 0,
     cache_creation_input_tokens: 0,
+    peak_input_tokens: 0,
   };
 }
 
 export function cacheHitRate(u: StepUsage): number {
-  const denom = u.cache_read_input_tokens + u.input_tokens;
+  const denom =
+    u.cache_read_input_tokens +
+    u.cache_creation_input_tokens +
+    u.input_tokens;
   if (denom <= 0) return 0;
   return u.cache_read_input_tokens / denom;
+}
+
+/** Peak per-inference input size for this step — the closest signal
+ *  to "how much context did the model actually see at the worst
+ *  moment." Use this to decide whether to rotate the session or to
+ *  show a context-window bar; do NOT use the per-step sums in
+ *  StepUsage, which double-count cache reads across every turn (a
+ *  200K prefix re-read 20 times sums to 4M). Falls back to the sum
+ *  for legacy step records that predate peak tracking. */
+export function inputContextTokens(u: StepUsage): number {
+  if (u.peak_input_tokens && u.peak_input_tokens > 0) return u.peak_input_tokens;
+  return u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+}
+
+/** Effective context window for the active model. Sonnet / Opus use
+ *  200K by default; the 1M-context Sonnet variant is opted into via
+ *  a model id containing "1m" (case-insensitive). Empty string falls
+ *  through to 200K so callers don't have to guard. */
+export function pickContextWindow(model: string | undefined): number {
+  if (model && /1m/i.test(model)) return 1_000_000;
+  return 200_000;
 }

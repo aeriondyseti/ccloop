@@ -52,6 +52,33 @@ describe("state round-trip", () => {
     expect(() => validateState({ schema_version: 1 })).toThrow(StateError);
   });
 
+  test("validateState rejects unknown state value", () => {
+    const s = { ...freshState(), state: "wat" };
+    expect(() => validateState(s)).toThrow(/state.*must be one of/);
+  });
+
+  test("validateState rejects state=paused without pause info", () => {
+    const s = { ...freshState(), state: "paused", pause: null };
+    expect(() => validateState(s)).toThrow(/state=paused but `pause` is null/);
+  });
+
+  test("validateState rejects state=escalated without escalation info", () => {
+    const s = { ...freshState(), state: "escalated", escalation: null };
+    expect(() => validateState(s)).toThrow(/state=escalated but `escalation` is null/);
+  });
+
+  test("validateState rejects NaN / Infinity in numeric fields", () => {
+    // typeof NaN === "number" — a hand-edited state.json with NaN
+    // here would otherwise silently pass and produce nonsense
+    // comparisons in the loop driver.
+    expect(() =>
+      validateState({ ...freshState(), current_step: Number.NaN }),
+    ).toThrow(/must be a finite number/);
+    expect(() =>
+      validateState({ ...freshState(), wall_clock_ms: Number.POSITIVE_INFINITY }),
+    ).toThrow(/must be a finite number/);
+  });
+
   test("write is atomic (no .tmp left behind)", async () => {
     const path = join(dir, "state.json");
     await writeState(path, freshState());
@@ -60,5 +87,12 @@ describe("state round-trip", () => {
     // The .tmp variant should not exist
     const tmpPath = `${path}.tmp.${process.pid}`;
     await expect(readFile(tmpPath, "utf8")).rejects.toThrow();
+  });
+
+  test("validateState defaults rotation_summary to null on legacy state.json", () => {
+    const legacy = freshState() as unknown as Record<string, unknown>;
+    delete legacy.rotation_summary;
+    const out = validateState(legacy);
+    expect(out.rotation_summary).toBeNull();
   });
 });

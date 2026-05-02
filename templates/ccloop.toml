@@ -27,6 +27,26 @@ escalate_at_utilization = 80.0
 # reset time (seconds).
 rate_limit_default_pause_seconds = 3600
 
+# Optional shell command run after each successful step, before the
+# auto-commit. Non-zero exit → step is recorded as a `gate` failure
+# and not committed; the captured output feeds the next prompt's
+# last_error block. Common values: "bun run typecheck",
+# "bun run typecheck && bun test". Empty disables.
+gate_command = ""
+
+# Per-invocation timeout for gate_command (seconds).
+gate_timeout_seconds = 300
+
+# Run each step inside a git worktree at .ccloop/worktree/, branched
+# from HEAD onto ccloop/<run_id>. The user's working branch is
+# untouched until the run finishes; on `done`, ccloop fast-forwards
+# the original branch onto the worktree's tip and removes the
+# worktree. If the original branch was moved during the run (so a
+# fast-forward isn't possible), the worktree is retained and the
+# user merges manually. Disable to commit straight onto the current
+# branch.
+use_worktree = true
+
 [claude]
 # false: permissionMode = "acceptEdits"; non-edit Bash routed through
 #        bwrap (Linux) / sandbox-exec (macOS) scoped to CWD; denylist
@@ -37,14 +57,49 @@ yolo_mode = false
 
 # SDK's maxTurns. Bounds Anthropic-turns per ccloop step. (Anthropic
 # "turn" = ccloop "inference"; see SPEC §2.5.)
-max_turns_per_step = 50
+max_turns_per_step = 20
 
-# How many auto-continuations after stop_reason="pause_turn" within
-# the same ccloop step before giving up.
+# How many in-step auto-continuations after stop_reason="pause_turn"
+# before giving up. When pause_turn fires, ccloop calls the SDK again
+# with the same session and prompt="continue" to let Claude finish
+# its work without a step boundary (which would otherwise produce a
+# half-finished commit + cadence sleep). 0 disables.
 max_continuations_per_step = 5
 
-# SDK reasoning effort. "xhigh" recommended on Opus 4.7.
+# SDK reasoning effort. Mapped to maxThinkingTokens internally:
+#   low=4000, medium=12000, high=24000, xhigh=64000.
+# An unrecognized value leaves the SDK on its own default.
+# "xhigh" recommended on Opus 4.7.
 effort = "xhigh"
+
+# Cap how many consecutive steps reuse a single SDK session before
+# ccloop forces a fresh one. 0 disables (always resume). Default 30
+# bounds context growth on overnight runs — at ~5KB per step,
+# resuming indefinitely fills the 200K context window in ~40 steps
+# and starts producing "context too long" errors. The cost of an
+# occasional cache-rebuild is paid back by avoiding an ever-growing
+# conversation prefix. Claude re-reads SPEC.md and progress.md from
+# disk on the first step after each reset.
+max_steps_per_session = 30
+
+# Specific Claude model. Empty uses the SDK's current default.
+# Examples: "claude-opus-4-7", "claude-sonnet-4-6".
+model = ""
+
+# Fallback model if the primary fails or is unavailable. Empty
+# disables. For overnight resilience: when Anthropic is overloaded
+# the primary may 5xx; the fallback lets the run continue at a
+# different capacity tier instead of escalating.
+fallback_model = ""
+
+# Hard wall-clock cap on a single step's SDK call (seconds). 0
+# disables. The SDK has no native deadline on its iterator; if a
+# network read stalls mid-stream the step would otherwise hang
+# until SIGINT. The watchdog aborts via the same controller used
+# for SIGINT, records a `step_timeout` failure, and routes through
+# normal backoff/escalation so an overnight hang surfaces as a
+# regular failure cluster rather than a silent stall.
+step_timeout_seconds = 1800
 
 [failure]
 # After this many consecutive step failures, escalate.
@@ -74,6 +129,12 @@ pause_alert_seconds = 1800
 
 # Notify on successful run completion.
 notify_on_done = false
+
+# Optional liveness URL pinged after every step (any outcome) and on
+# done. Designed for healthchecks.io-style endpoints so an off-device
+# monitor can alert when ccloop stops sending pings overnight.
+# Best-effort POST with a small JSON body; failures are swallowed.
+heartbeat_url = ""
 
 [prompt]
 # Optional path to a custom prompt template, replacing the default

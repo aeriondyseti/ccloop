@@ -197,7 +197,9 @@ persisted to `state.json` so subsequent instances can `resume`.
 `ENABLE_PROMPT_CACHING_1H=1`, which ccloop sets).
 
 **Cache hit rate** — `cache_read_input_tokens / (cache_read_input_tokens
-+ input_tokens)` per step, summed across all turns within the step.
++ cache_creation_input_tokens + input_tokens)` per step, summed across
+all turns within the step. Cache creation counts as a miss: those tokens
+were processed fresh and written to the cache for later reads.
 
 **Usage window** — Anthropic's rolling rate-limit windows (5h and
 weekly). Distinct from cache window.
@@ -374,6 +376,13 @@ to §9 with the step name as the failure category.
 
 **Post-flight**:
 
+7a. Optional gate (`loop.gate_command`, default empty): if configured
+    and the step is otherwise a success, run the command via `sh -c`
+    in the project group, bounded by `loop.gate_timeout_seconds`
+    (default 300). Non-zero exit or timeout ⇒ record the step as a
+    `gate` failure (§9.1) with the captured stdout/stderr tail as the
+    excerpt; skip the auto-commit; route through §9.2. Zero exit ⇒
+    proceed to step 8.
 8. Auto-commit: `git add -A && git commit -m "<auto>"` with a message
    derived from the final assistant text (sanitized; capped). On
    unchanged tree, skip and record `no-op` in the step record.
@@ -502,11 +511,11 @@ step as ended.
 |---|---|---|
 | `includePartialMessages` | `true` | Drives live TUI from streamed events. |
 | `maxTurns` | from `[claude].max_turns_per_step` (default `50`) | Anthropic's `maxTurns` — bounds Anthropic-turns per step (= inferences in ccloop's vocabulary; see §2.5). |
-| `permissionMode` | derived from `[claude].yolo_mode`: `false` → `"acceptEdits"`, `true` → `"bypassPermissions"` | See §6.5. |
+| `permissionMode` | derived from `[claude].yolo_mode`: `false` → `"default"`, `true` → `"bypassPermissions"` | See §6.5. |
 | `cwd` | target project root | Scopes tool calls to the project. |
 | `settingSources` | `["project"]` | Loads the project's `CLAUDE.md` / hooks if present. |
 | `effort` | from `[claude].effort` (default `"xhigh"`) | Highest-quality reasoning per step (Opus 4.7 recommendation). |
-| `canUseTool` | ccloop's sandbox-aware approver (see §6.5) | Auto-approves tool calls; routes Bash through `bwrap` / `sandbox-exec` when `yolo_mode: false`. |
+| `hooks.PreToolUse` | ccloop's sandbox-aware approver (see §6.5) | Pre-empts the CLI's hardcoded permission gates so the approver is the only trust boundary. |
 | `resume` / `continue` | from `state.json` if present | See §6.2. |
 
 `allowedTools` is **not** set. Users wanting tool restrictions
@@ -514,24 +523,70 @@ configure them in their `~/.claude/` settings.
 
 ### 6.5 Sandbox / permission policy
 
-`yolo_mode` is the single user-facing knob:
+`yolo_mode` is the single user-facing knob.
+
+**Why hooks, not `canUseTool`.** The Claude Agent SDK is a wrapper
+around the `claude` CLI binary; the binary owns the permission system
+and applies several hardcoded pre-checks before invoking
+`canUseTool`:
+
+- A Bash command-prefix allowlist (only common commands like `ls`,
+  `cat`, `grep` auto-pass; `bun init`, `mkdir`, `chmod`, etc. require
+  approval).
+- A shell-operator gate (any command containing `>`, `<<`, `&&`, `|`,
+  `||` requires approval).
+- A file-write permission gate (Edit / Write to any path without a
+  matching `permissions.allow` rule requires approval).
+
+In an SDK context with no UI, "requires approval" comes back as a
+tool error *without* ever invoking `canUseTool` — so a `canUseTool`
+approver could not actually intercept those calls or wrap them in a
+sandbox. **`hooks.PreToolUse`**, by contrast, runs *before* the
+binary's permission system and can return an explicit
+`permissionDecision` that overrides every pre-check. ccloop therefore
+hangs its sandbox + denylist on a `PreToolUse` hook.
 
 - **`yolo_mode: false`** (default):
-  - `permissionMode: "acceptEdits"` — file ops auto-approved by the
-    SDK with built-in CWD-scoping.
-  - `canUseTool` callback approves any tool that falls through —
-    notably non-edit Bash. Bash invocations are wrapped through
-    `bwrap` (Linux) or `sandbox-exec` (macOS) configured to allow
-    only CWD writes/reads.
-  - Hook layer applies a denylist of catastrophic patterns
-    (`rm -rf /`, `:(){:|:&};:`, `sudo`, `dd of=/dev/`, etc.). Denials
-    return as tool errors so Claude can course-correct.
+  - `permissionMode: "default"`.
+  - `hooks.PreToolUse` runs before the CLI's permission system. The
+    hook returns one of `{ permissionDecision: 'allow' | 'deny',
+    permissionDecisionReason?, updatedInput? }`.
+  - Bash invocations are denylist-checked first; on match, the hook
+    returns `deny` with the reason. The denylist covers catastrophic
+    local patterns (`rm -rf /`, `:(){:|:&};:`, `sudo`, `dd of=/dev/`,
+    etc.) and unambiguously destructive remote-mutation patterns
+    (`git push --force` / `-f` / `--force-with-lease`, `git push
+    <remote> +ref` shorthand, and `npm`/`yarn`/`pnpm`/`bun publish`).
+    Network is otherwise unrestricted, so the denylist is the only
+    guard against an overnight run rewriting a remote branch or
+    publishing a package while the operator is away. Denials surface
+    as tool errors so Claude can course-correct.
+  - Bash invocations are otherwise allowed with `updatedInput.command`
+    rewritten to wrap the original command via `bwrap` (Linux) or
+    `sandbox-exec` (macOS). Both platforms apply the same shape:
+    *reads are unrestricted across the host filesystem; writes are
+    scoped to CWD and `/tmp`.* On Linux, bwrap ro-binds `/` and then
+    layers a writable tmpfs on `/tmp` and a RW bind on CWD on top.
+    On macOS, sandbox-exec uses `(allow default) (deny file-write*)`
+    plus a write-allowlist for CWD and `/tmp`. This shape lets
+    user-installed toolchains anywhere on disk (mise, asdf, nvm,
+    `~/.bun`, `~/.cargo`, Homebrew, `/opt/...`) resolve inside the
+    sandbox without enumeration. Network access is **not** restricted
+    — package installers (`bun install`, `npm install`, `go mod
+    download`, `pip install`, etc.) need internet; the boundary is
+    filesystem scope, not exfiltration. Note: tools that write caches
+    under `$HOME` (e.g. `~/.npm`, `~/.bun/install/cache`) will see
+    EROFS and should be pointed at a writable location via
+    tool-specific env vars, or run under `yolo_mode = true`.
+  - Edit / Write / NotebookEdit / MultiEdit are allowed unchanged —
+    the SDK's `cwd` already scopes file ops to the project root.
   - Per-Bash sandbox setup is fast (no VM), measurable in
     milliseconds.
 
 - **`yolo_mode: true`**:
-  - `permissionMode: "bypassPermissions"`.
-  - `canUseTool` returns approve unconditionally; no sandboxing.
+  - `permissionMode: "bypassPermissions"` + `allowDangerouslySkipPermissions: true`.
+  - The hook still runs but returns `allow` for every tool call with
+    no rewriting; no sandboxing.
   - ccloop logs a warning on every instance start when `yolo_mode` is
     on.
 
@@ -540,8 +595,9 @@ configure them in their `~/.claude/` settings.
 - A sandbox-blocked tool call returns to Claude as a tool error with a
   descriptive message (e.g. "command refers to path outside CWD").
   This is **not** a step failure (§9.1) — Claude course-corrects.
-- If `bwrap` is unavailable on Linux while `yolo_mode: false`, ccloop
-  refuses to start with a clear error.
+- If `bwrap` is unavailable on Linux while `yolo_mode: false`, the
+  hook denies the call with a clear reason; the agent surfaces it,
+  the user installs `bwrap` (or sets `yolo_mode = true`).
 
 ### 6.6 Environment
 
@@ -691,8 +747,15 @@ Persisted to `./.ccloop/steps/NNNN.json`.
 
 ```
 hit_rate = cache_read_input_tokens
-         / (cache_read_input_tokens + input_tokens)
+         / (cache_read_input_tokens
+            + cache_creation_input_tokens
+            + input_tokens)
 ```
+
+Cache creation is treated as a miss: those tokens were billed as fresh
+input and written to the cache for *future* reads, not served from it.
+Excluding them inflates the rate to ~100% any time the system prompt
+is cached and the new user turn is small.
 
 Surfaced on the dashboard per step and as a rolling average for the
 run. ccloop logs a warning when hit rate drops below 50% three steps
@@ -721,11 +784,19 @@ responses gracefully; ccloop falls back to reactive-only detection
 
 Failure modes:
 
-- 429 (broken endpoint, known case for some Max subscribers): keep
-  last good cache; proceed; reactive-only as safety net.
-- Auth error: surface to user as a token-rotation prompt; pause
-  indefinitely until resolved (escalation event).
-- Shape mismatch: warn; fall back to reactive-only.
+- 429 (broken endpoint, known case for some Max subscribers — see
+  anthropics/claude-code#30930, #31021): keep last good cache; proceed;
+  reactive-only as safety net.
+- 403: token is valid but lacks the `user:profile` scope this
+  endpoint requires. `claude setup-token` issues `user:inference`
+  only; the full `claude /login` OAuth flow grants `user:profile`.
+  ccloop emits a one-time `usage_degraded` event explaining this and
+  falls back to reactive-only — the proactive gate is advisory, so
+  halting the run over a missing scope is wrong.
+- 401: token genuinely invalid. Surface as a token-rotation prompt;
+  pause indefinitely until resolved (escalation event).
+- Shape mismatch / network error: emit `usage_degraded`; fall back
+  to reactive-only.
 
 ### 7.7 What the dashboard surfaces
 
@@ -877,6 +948,8 @@ Step number does not advance during pause.
 | `structured_output` | `subtype: "error_max_structured_output_retries"` |
 | `refusal` | `subtype: "success"` + `stop_reason: "refusal"` |
 | `commit` | `git commit` errored after work was done |
+| `gate` | `loop.gate_command` (if configured) exited non-zero or timed out |
+| `step_timeout` | step exceeded `claude.step_timeout_seconds` watchdog |
 | `loop_detected` | §9.4 heuristic |
 
 What is **not** a failure:
@@ -960,6 +1033,13 @@ If killed while ESCALATED, `state.json` marks the run as escalated;
   ntfy.sh, Pushover, etc.
 - **Webhook**: HTTP POST to `webhook_url`. Body is a JSON envelope
   (run id, step number, reason, trail, dashboard pointer).
+- **Heartbeat**: HTTP POST to `heartbeat_url` (optional). Body is a
+  small JSON envelope (run id, step, outcome, state, ts). Fired
+  after every step (any outcome, including SDK throws) and on done.
+  Designed for healthchecks.io-style endpoints so an off-device
+  monitor can alert when ccloop goes silent overnight. Best-effort
+  with a 10s timeout per ping; not rate-limited locally — the
+  monitoring endpoint enforces its own cadence policy.
 
 Either or both can be configured; if neither, ccloop logs the
 escalation to `events.jsonl` and proceeds to the TUI screen without
@@ -1079,11 +1159,13 @@ records for derived metrics. It never reads `events.jsonl` directly.
 
 ### 11.2 TUI architecture
 
-- Renderer: `ink`.
+- Renderer: `ink` + `ink-scroll-view` for the scrollable panes.
 - Tick: 250ms render tick. Independent of the step loop.
 - Event bus: in-memory queue. Step lifecycle code emits; TUI
-  subscribes. Events also written to `events.jsonl` by a separate
-  writer.
+  subscribes. Most events are also written to `events.jsonl` by a
+  separate writer; the bus-only `stream_chunk` event (carrying live
+  SDK turn events for the Now pane) is **not** persisted — it would
+  bloat the durable log without paying rent.
 - Polling: usage endpoint (§7.6) every 30s. Step records read on
   completion.
 - Resize: terminal resize triggers re-layout; renders minimal layout
@@ -1102,16 +1184,49 @@ records for derived metrics. It never reads `events.jsonl` directly.
 
 ### 11.4 Dashboard content (RUNNING)
 
-| Panel row | Source |
+The dashboard is a single column of bordered panes. Three panes are
+**focusable** (scrollable, keyboard-navigable); the rest are static.
+
+| Pane | Focusable? | Source |
+|---|---|---|
+| header (state · step · cost · tokens · cwd) | no | `state.json` + wall clock + rolling step-record averages |
+| **now** (live current-step stream) | yes | bus `stream_chunk` events parsed from SDK assistant / tool_use / tool_result blocks; cleared on `step_start` |
+| usage (5h / weekly utilization bars) | no | `/api/oauth/usage` cache (§7.6) |
+| **recent steps** | yes | `./.ccloop/steps/*.json`, all entries (pane scrolls) |
+| **log** (human-readable event tail) | yes | bus events formatted; 500-entry ring buffer |
+| controls hint | no | static, per-state |
+
+**Focus model.** Exactly one focusable pane has keyboard focus at any
+time. The focused pane renders with a double-line border in `cyan`;
+unfocused focusable panes render with a rounded `gray` border. Static
+panes render with a rounded default border. Initial focus is `now`.
+
+**Keyboard.** In RUNNING / PAUSED / DONE:
+
+| Key | Action |
 |---|---|
-| status / step counter / elapsed | `state.json` + wall clock |
-| done indicators (informational) | parse SPEC.md (checklist, Verification Requirements heading), `fs.existsSync("DONE.md")` |
-| current step (template, tools, last actions) | live event stream from SDK |
-| 5h / weekly bars | `/api/oauth/usage` cache (§7.6) |
-| tokens, cost, cache hit rate | rolling averages from step records |
-| recent steps | last 5 entries from `./.ccloop/steps/*.json` |
-| events tail | last N events from in-memory bus |
-| controls hint | static |
+| `Tab` / `Shift+Tab` | Cycle focus forward / backward through available panes |
+| `↑` / `↓` | Scroll focused pane by one line |
+| `PgUp` / `PgDn` | Scroll focused pane by one viewport |
+| `g` / `G` | Top / bottom of focused pane (vim-style) |
+| `Ctrl-C` | Stop the loop |
+
+ESCALATED and GUARDRAIL_TRIP keep their state-specific single-letter
+menu keys (§9.6, §10.5) and disable scroll keys.
+
+**Auto-tail.** Each focusable pane auto-scrolls to the bottom on new
+content unless the user has manually scrolled away from the bottom.
+Pressing `G` (or scrolling back to the bottom) re-engages auto-tail.
+
+**Now-pane content.** A flat sequence of `TurnEvent`s built per step:
+- `turn_start` — separator marking a new Anthropic turn
+- `assistant_text` — prose blocks emitted by the model
+- `tool_use` — tool name + truncated input summary (e.g. `▶ Bash · bun test`)
+- `tool_result` — pass/fail glyph + truncated excerpt
+- `idle` — synthetic, used during cadence sleeps between steps
+
+The Now pane is cleared at each `step_start` so it always reflects the
+*current* step's stream, not the entire run.
 
 ### 11.5 Event log schema
 
@@ -1131,21 +1246,21 @@ MVP event types:
 
 | Type | When | Extra |
 |---|---|---|
-| `instance_start` | Boot | `git_sha`, `cwd`, `ccloop_version` |
-| `instance_exit` | Clean shutdown | `reason`, `exit_code` |
-| `validation_ok` | After §3 validation passes | none |
-| `validation_failed` | Validation refused start | `reason` |
+| `instance_start` | Process startup, after state load | `ccloop_version`, `cwd`, `git_sha` |
+| `instance_exit` | Cleanup after `runLoop` returns | `reason`, `exit_code` |
 | `step_start` | Pre-flight begins | none |
-| `step_end` | Post-flight completes | `subtype`, `stop_reason`, `duration_ms`, `cost_usd`, `commit_sha` |
+| `step_end` | Post-flight completes | `subtype`, `stop_reason`, `duration_ms`, `cost_usd`, `commit_sha`, `commit_subject`, `outcome` |
 | `step_failed` | Step failure | `category`, `error_excerpt` |
-| `tool_call` | SDK reports tool use | `tool`, `input_summary` (capped) |
-| `pause_enter` | §8 pause begins | `reason`, `pause_until`, `window` |
+| `pause_enter` | §8 pause begins | `reason`, `until`, `window` |
 | `pause_exit` | Pause ends | `wake_reason` |
-| `escalate` | §9 escalation | `reason`, `failure_trail` |
+| `escalate` | §9 escalation | `reason` |
+| `escalation_resolved` | Operator picked an action at the escalation menu | `action` (`continue` / `revert` / `edit_spec` / `quit`) |
 | `guardrail_trip` | §10 trip | `which`, `limit`, `actual` |
-| `notification_sent` | Push or webhook fired | `channel`, `status` |
-| `compact_boundary` | SDK auto-compaction | none |
-| `done` | DONE.md detected | `step`, `final_commit_sha` |
+| `notification_sent` | Push/webhook channel attempt resolved | `channel`, `ok`, `status`, `error?` |
+| `usage_degraded` | Proactive usage endpoint unavailable / rate-limited | `status`, `reason` |
+| `cache_warning` | Cache hit rate below threshold for N consecutive steps (§11) | `streak`, `rate` |
+| `recovery_commit` | §10.4 dirty-tree recovery committed unsaved work from a crashed prior instance | `commit_sha`, `commit_subject` |
+| `done` | DONE.md detected | `final_commit_sha` |
 
 Unknown event types are not validated — append-only and tolerant.
 
@@ -1517,6 +1632,69 @@ ccloop does not "self-heal" — if the user broke it, fix or delete.
 
 ---
 
+## 13c. Design Loop
+
+The design loop (`ccloop design`) is an interactive mode that produces
+a validated `SPEC.md` for the build loop to consume. Unlike the build
+loop's autonomous execution, the design loop is human-in-the-loop:
+the agent guides the user through a structured design process.
+
+**Implementation location**: `src/design/`
+
+**Key modules**:
+- `types.ts` — core types (DesignPhase, DesignSessionState, events)
+- `constants.ts` — phase order, default config, artifact paths
+- `prompts.ts` — system prompt + per-phase scaffolding
+- `draft.ts` — draft initialization, validation (reuses `validateSpec`), promotion
+- `session.ts` — metadata persistence for resume
+- `events.ts` — lifecycle events to `.ccloop/events.jsonl`
+- `approver.ts` — PreToolUse hook restricting writes to `.ccloop/design/`
+- `acceptance.ts` — validation gate logic when user signals accept
+
+**Design artifacts** (all under `./.ccloop/design/`):
+- `spec.draft.md` — in-progress spec
+- `ROADMAP.md` — future scope (optional, promoted if exists)
+- `IDEAS.md` — idea parking lot (optional, promoted if exists)
+- `TECH-DEBT.md` — intentional shortcuts (optional, promoted if exists)
+- `session.json` — resume metadata (phase, turn count, cost)
+- `last-session.md` — graceful-shutdown summary (Ctrl+C)
+
+**Phase flow** (linear in MVP):
+1. Vision → 2. Users → 3. Scope → 4. Architecture → 5. Milestones → 6. Acceptance
+
+**Agent tools** (sandbox-restricted via `makeDesignApprover`):
+- Read/Grep/Glob (read-only, anywhere in CWD)
+- Edit/Write (path-restricted to `.ccloop/design/` only)
+- Bash (sandboxed via bwrap/sandbox-exec, same as build loop)
+- WebSearch/WebFetch
+- `ask_user` MCP tool (in-process server, multiple-choice prompts)
+
+**Resume model**: On re-invocation, if `spec.draft.md` exists, load it
+as starting state. Conversation history is **not** restored (fresh SDK
+session each time); the draft itself provides continuity.
+
+**Acceptance flow**: When user signals accept (via `ask_user` or future
+slash command), run `validateSpec` on draft. If validation fails,
+surface errors and stay in loop. If validation passes, prompt user to
+confirm promotion. On confirm, copy draft + sibling artifacts to
+project root, offer to launch `ccloop build`.
+
+**Configuration**: `ccloop.toml` `[design]` section. Keys: `model`
+(defaults to Opus, independent of `[build].model`), `max_turns`
+(default 100), `effort` (default "high"), `enable_tui` (default true).
+
+**Event emission**: Design sessions emit to the same `events.jsonl` as
+the build loop. Event types: `design_session_start`,
+`design_phase_enter`, `ask_user_asked`, `ask_user_answered`,
+`draft_edit`, `design_session_accept`, `design_session_abort`,
+`design_session_end`.
+
+**No global state**: All design state lives in `.ccloop/design/`.
+Deleting that directory clears design session; deleting `.ccloop/`
+clears everything.
+
+---
+
 ## 14. Known Unknowns
 
 Items requiring empirical validation during build, not assumption.
@@ -1585,3 +1763,4 @@ Items requiring empirical validation during build, not assumption.
 This section is the punch-list. The implementing agent closes each
 item by capturing data and updating the relevant section. After MVP,
 this section can be deleted along with the rest of `.claude/`.
+

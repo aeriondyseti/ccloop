@@ -6,7 +6,6 @@ export interface RunFlags {
   cadence?: number;
   yolo?: boolean;
   promptPath?: string;
-  logLevel?: string;
   noColor?: boolean;
 }
 
@@ -57,9 +56,6 @@ export function parseRunFlags(argv: string[]): RunFlags {
         break;
       case "--prompt":
         flags.promptPath = takeValue(a, argv, i++);
-        break;
-      case "--log-level":
-        flags.logLevel = takeValue(a, argv, i++);
         break;
       default:
         throw new FlagError(`unknown flag '${a}'`);

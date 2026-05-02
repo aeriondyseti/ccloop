@@ -86,7 +86,7 @@ function parseReset(text: string, now: number): number | null {
 
 function unitToMs(n: number, unit: string): number | null {
   if (unit.startsWith("s")) return n * 1000;
-  if (unit.startsWith("m") && unit !== "h") return n * 60 * 1000;
+  if (unit.startsWith("m")) return n * 60 * 1000;
   if (unit.startsWith("h")) return n * 60 * 60 * 1000;
   return null;
 }
