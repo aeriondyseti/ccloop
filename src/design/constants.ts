@@ -1,13 +1,5 @@
-/**
- * Constants for the design loop.
- */
-
 import type { DesignPhase, DesignPaths } from "./types.ts";
 
-/**
- * Design phases in linear order.
- * The agent is instructed to complete each phase before advancing to the next.
- */
 export const DESIGN_PHASES: readonly DesignPhase[] = [
   "vision",
   "users",
@@ -17,9 +9,6 @@ export const DESIGN_PHASES: readonly DesignPhase[] = [
   "acceptance",
 ] as const;
 
-/**
- * Relative paths for design artifacts within ./.ccloop/design/
- */
 export const DESIGN_ARTIFACT_PATHS: DesignPaths = {
   draft: "./.ccloop/design/spec.draft.md",
   roadmap: "./.ccloop/design/ROADMAP.md",
@@ -28,11 +17,10 @@ export const DESIGN_ARTIFACT_PATHS: DesignPaths = {
   lastSession: "./.ccloop/design/last-session.md",
 };
 
-/**
- * Default configuration values for design sessions.
- */
 export const DEFAULT_DESIGN_CONFIG = {
   model: "claude-opus-4-20250514",
-  max_turns: 100, // Generous limit for interactive sessions
+  // Generous default — interactive sessions that hit the cap are
+  // not a productive failure mode.
+  max_turns: 100,
   effort: "high",
 } as const;
