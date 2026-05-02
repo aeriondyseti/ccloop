@@ -96,8 +96,32 @@ function BuildLoopHeader({ view }: { view: TuiViewModel }): React.ReactElement {
       averageCacheHitRate={view.averageCacheHitRate}
       cacheLowStreak={view.cacheLowStreak}
       cwd={view.cwd}
+      additionalMetrics={renderTodos(view.claudeTodos)}
     />
   );
+}
+
+/** Compact one-line summary of Claude's TodoWrite list, sized to fit
+ *  in the header alongside the existing metrics. Empty list returns
+ *  null so the header just hides the slot. */
+function renderTodos(todos: TuiViewModel["claudeTodos"]): React.ReactNode {
+  if (todos.length === 0) return null;
+  let pending = 0, inFlight = 0, done = 0;
+  let activeLabel = "";
+  for (const t of todos) {
+    if (t.status === "pending") pending++;
+    else if (t.status === "in_progress") {
+      inFlight++;
+      if (!activeLabel) activeLabel = t.activeForm ?? t.content;
+    } else if (t.status === "completed") done++;
+  }
+  const summary = `  ·  todos ${done}/${todos.length}` +
+    (inFlight > 0 && activeLabel ? ` (${truncateLabel(activeLabel, 40)})` : "");
+  return <Text dimColor>{summary}</Text>;
+}
+
+function truncateLabel(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + "…";
 }
 
 /** Header status segment: "cadence X/Y s" while in a cadence wait,
@@ -179,6 +203,10 @@ function turnTitle(last: TurnEvent): string {
       return "transcript · ◌ thinking";
     case "turn_start":
       return `transcript · turn ${last.turn}`;
+    case "todo_state": {
+      const done = last.todos.filter((t) => t.status === "completed").length;
+      return `transcript · todos ${done}/${last.todos.length}`;
+    }
     case "idle":
       return `transcript · ${last.note}`;
   }
@@ -233,9 +261,34 @@ function TurnRow({ event }: { event: TurnEvent }): React.ReactElement {
           </Text>
         </Box>
       );
+    case "todo_state": {
+      const done = event.todos.filter((t) => t.status === "completed").length;
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="yellow" dimColor>todo plan ({done}/{event.todos.length})</Text>
+          {event.todos.map((t, i) => (
+            <Text key={i} color={statusColor(t.status)}>
+              {statusGlyph(t.status)} {t.content}
+            </Text>
+          ))}
+        </Box>
+      );
+    }
     case "idle":
       return <Text dimColor>· {event.note}</Text>;
   }
+}
+
+function statusGlyph(status: "pending" | "in_progress" | "completed"): string {
+  if (status === "completed") return "✓";
+  if (status === "in_progress") return "◐";
+  return "▢";
+}
+
+function statusColor(status: "pending" | "in_progress" | "completed"): string {
+  if (status === "completed") return "green";
+  if (status === "in_progress") return "yellow";
+  return "gray";
 }
 
 /** Durable lifecycle event — mapped to a typed visual block (system

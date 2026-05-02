@@ -205,4 +205,33 @@ describe("project", () => {
     });
     expect(v.controlsHint).toMatch(/p pause/);
   });
+
+  test("claudeTodos picks the latest todo_state from the live stream", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+      nowContent: [
+        { kind: "turn_start", turn: 1, ts: "t0" },
+        { kind: "todo_state", todos: [
+          { content: "first", status: "pending" },
+        ], ts: "t1" },
+        { kind: "tool_use", tool: "Read", summary: "spec", ts: "t2" },
+        { kind: "todo_state", todos: [
+          { content: "first", status: "completed" },
+          { content: "second", status: "in_progress" },
+        ], ts: "t3" },
+      ],
+    });
+    expect(v.claudeTodos.length).toBe(2);
+    expect(v.claudeTodos[0]?.status).toBe("completed");
+    expect(v.claudeTodos[1]?.status).toBe("in_progress");
+  });
+
+  test("claudeTodos defaults to empty when no todo_state events seen", () => {
+    const s = freshState();
+    const v = project({
+      state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
+    });
+    expect(v.claudeTodos).toEqual([]);
+  });
 });

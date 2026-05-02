@@ -5,6 +5,17 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Added
+- **Surface Claude's TodoWrite plan in the build TUI.** The
+  `StreamParser` now extracts a `TodoWrite` tool_use's `input.todos`
+  array into a typed `todo_state` turn event in addition to the
+  generic `tool_use` event. The projector pulls the latest snapshot
+  into `view.claudeTodos`; the header shows a compact
+  "todos N/M (in-flight item)" segment alongside the SPEC checklist
+  count, and the transcript renders each TodoWrite call as a styled
+  list block (▢ pending / ◐ in-flight / ✓ done) so the operator can
+  watch the agent's working plan evolve. Distinct from the static
+  SPEC checklist — that's the user's target; this is the agent's
+  in-flight working memory.
 - **Operator pause** (`p` to toggle while RUNNING / OPERATOR_PAUSED).
   Per-instance, in-memory; not durable — restarting ccloop resumes
   running. Distinct from rate-limit pauses (which set
