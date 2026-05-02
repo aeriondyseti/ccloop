@@ -10,7 +10,7 @@ The spec lives at \`./SPEC.md\` and the running journal lives at
 you haven't already loaded it in this session — ccloop deliberately
 does not paste them into this prompt.
 
-{{last_error}}
+{{rotation_summary}}{{last_error}}
 
 # Your task this step (#{{step}})
 
@@ -47,6 +47,11 @@ export interface PromptVars {
   progress: string;
   last_error: string;
   step: number;
+  /** Optional carry-over summary from a just-rotated session. Empty
+   *  string disables the rendering. The driver clears the source
+   *  state field after this is consumed so subsequent steps don't
+   *  keep replaying the same summary. */
+  rotation_summary: string;
 }
 
 /** Load the per-run prompt template. Empty `overridePath` returns the
@@ -74,5 +79,22 @@ export function renderPrompt(template: string, vars: PromptVars): string {
     .replaceAll("{{spec}}", vars.spec)
     .replaceAll("{{progress}}", vars.progress)
     .replaceAll("{{last_error}}", vars.last_error)
+    .replaceAll("{{rotation_summary}}", renderRotationSummary(vars.rotation_summary))
     .replaceAll("{{step}}", String(vars.step));
+}
+
+/** Wrap a non-empty rotation summary in a markdown heading so it's
+ *  visually distinct from the rest of the prompt. Empty input
+ *  returns empty string so the slot disappears in normal steps. */
+export function renderRotationSummary(summary: string): string {
+  const trimmed = summary.trim();
+  if (!trimmed) return "";
+  return (
+    "# Picking up from a rotated session\n\n" +
+    "The previous SDK session approached its context limit and was " +
+    "rotated. Here is its self-summary; treat it as ground truth for " +
+    "what's already been done and pick the next concrete step from " +
+    "that state.\n\n" +
+    "> " + trimmed.split("\n").join("\n> ") + "\n\n"
+  );
 }

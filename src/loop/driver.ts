@@ -23,6 +23,7 @@ import {
 } from "../state/state.ts";
 import { loadPromptTemplate, renderPrompt } from "../sdk/prompt.ts";
 import { runStep } from "../sdk/runStep.ts";
+import { summarizeSession } from "../sdk/summarize.ts";
 import { StreamParser } from "../sdk/streamParser.ts";
 import { type StepResult, emptyUsage, inputContextTokens, pickContextWindow } from "../sdk/types.ts";
 import { makeApprover } from "../sandbox/approver.ts";
@@ -105,6 +106,9 @@ export interface DriverDeps {
   headSha?: typeof headSha;
   /** Test seam — optional override of gate command runner. */
   runGate?: typeof runGate;
+  /** Test seam — pluggable session summarizer (used on proactive
+   *  rotations to seed the next session with carry-over context). */
+  summarizeSession?: typeof summarizeSession;
 }
 
 export class LoopDriver {
@@ -128,6 +132,7 @@ export class LoopDriver {
       headDiffHash: deps.headDiffHash ?? headDiffHash,
       headSha: deps.headSha ?? headSha,
       runGate: deps.runGate ?? runGate,
+      summarizeSession: deps.summarizeSession ?? summarizeSession,
     };
   }
 
@@ -263,9 +268,14 @@ export class LoopDriver {
         ? await readFileOrEmpty(this.paths.progress)
         : "",
       last_error: renderLastError(state),
+      rotation_summary: state.rotation_summary ?? "",
       step: state.current_step,
     };
     const prompt = renderPrompt(tpl, promptVars);
+    // Carry the rotation summary into exactly one step. Once the
+    // prompt has it baked in, a subsequent failure-and-retry would
+    // otherwise replay the same summary every step until rotation.
+    state.rotation_summary = null;
 
     await this.emit({
       run_id: state.run_id,
@@ -474,17 +484,8 @@ export class LoopDriver {
     }
 
     const cap = this.config.claude.max_steps_per_session;
-    if (cap > 0 && state.steps_since_session_reset >= cap) {
-      const previous = state.session_id;
-      state.session_id = null;
-      state.steps_since_session_reset = 0;
-      await this.emit({
-        run_id: state.run_id,
-        step: state.current_step,
-        type: "session_rotated",
-        reason: "step_cap",
-        previous_session_id: previous,
-      });
+    if (state.session_id !== null && cap > 0 && state.steps_since_session_reset >= cap) {
+      await this.rotateWithSummary(state, "step_cap");
     }
 
     // Proactive context rotation. The reactive context_overflow path
@@ -503,18 +504,7 @@ export class LoopDriver {
       const window = pickContextWindow(this.config.claude.model);
       const used = inputContextTokens(rec.usage);
       if (used >= window * threshold) {
-        const previous = state.session_id;
-        state.session_id = null;
-        state.steps_since_session_reset = 0;
-        await this.emit({
-          run_id: state.run_id,
-          step: state.current_step,
-          type: "session_rotated",
-          reason: "context_threshold",
-          previous_session_id: previous,
-          context_tokens: used,
-          context_window: window,
-        });
+        await this.rotateWithSummary(state, "context_threshold", { context_tokens: used, context_window: window });
       }
     }
 
@@ -590,6 +580,42 @@ export class LoopDriver {
     }
 
     return { kind: "ran", result, outcome };
+  }
+
+  /** Capture a session summary, then rotate. Used for proactive
+   *  rotations (step_cap, context_threshold) where the expiring
+   *  session is still healthy enough to answer. The summary lands
+   *  in `state.rotation_summary` so the next step's prompt template
+   *  carries it forward. Reactive context_overflow rotations skip
+   *  this — the session is wedged. */
+  private async rotateWithSummary(
+    state: CcloopState,
+    reason: "step_cap" | "context_threshold",
+    extra: { context_tokens?: number; context_window?: number } = {},
+  ): Promise<void> {
+    const previous = state.session_id;
+    if (previous !== null) {
+      try {
+        const summary = await this.deps.summarizeSession({
+          cwd: this.cwd,
+          resumeSessionId: previous,
+        });
+        state.rotation_summary = summary || null;
+      } catch {
+        state.rotation_summary = null;
+      }
+    }
+    state.session_id = null;
+    state.steps_since_session_reset = 0;
+    await this.emit({
+      run_id: state.run_id,
+      step: state.current_step,
+      type: "session_rotated",
+      reason,
+      previous_session_id: previous,
+      ...(extra.context_tokens !== undefined ? { context_tokens: extra.context_tokens } : {}),
+      ...(extra.context_window !== undefined ? { context_window: extra.context_window } : {}),
+    });
   }
 }
 

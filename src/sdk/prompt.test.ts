@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PROMPT_TEMPLATE, loadPromptTemplate, renderPrompt } from "./prompt.ts";
+import { DEFAULT_PROMPT_TEMPLATE, loadPromptTemplate, renderPrompt, renderRotationSummary } from "./prompt.ts";
 
 describe("renderPrompt", () => {
   test("default template substitutes step and last_error and ignores spec/progress", () => {
@@ -10,6 +10,7 @@ describe("renderPrompt", () => {
       spec: "SPEC_BODY",
       progress: "PROG",
       last_error: "ERR",
+      rotation_summary: "",
       step: 7,
     });
     expect(out).toContain("ERR");
@@ -26,7 +27,7 @@ describe("renderPrompt", () => {
 
   test("custom templates can still reference {{spec}} and {{progress}}", () => {
     const out = renderPrompt("S={{spec}} P={{progress}}", {
-      spec: "X", progress: "Y", last_error: "", step: 0,
+      spec: "X", progress: "Y", last_error: "", rotation_summary: "", step: 0,
     });
     expect(out).toBe("S=X P=Y");
   });
@@ -36,6 +37,7 @@ describe("renderPrompt", () => {
       spec: "S",
       progress: "",
       last_error: "",
+      rotation_summary: "",
       step: 3,
     });
     expect(out).toBe("3 / 3 / S");
@@ -51,9 +53,32 @@ describe("renderPrompt", () => {
     expect(DEFAULT_PROMPT_TEMPLATE).not.toContain("End your response");
   });
 
+  test("non-empty rotation_summary is wrapped in a markdown carry-over block", () => {
+    const out = renderPrompt(DEFAULT_PROMPT_TEMPLATE, {
+      spec: "", progress: "", last_error: "",
+      rotation_summary: "Did vision phase. Drafting users next.",
+      step: 4,
+    });
+    expect(out).toContain("Picking up from a rotated session");
+    expect(out).toContain("Did vision phase. Drafting users next.");
+  });
+
+  test("empty rotation_summary leaves no trace in the prompt", () => {
+    const out = renderPrompt(DEFAULT_PROMPT_TEMPLATE, {
+      spec: "", progress: "", last_error: "", rotation_summary: "", step: 1,
+    });
+    expect(out).not.toContain("Picking up from a rotated session");
+  });
+
+  test("renderRotationSummary blockquotes multiline summaries", () => {
+    const out = renderRotationSummary("line one\nline two");
+    expect(out).toContain("> line one");
+    expect(out).toContain("> line two");
+  });
+
   test("empty last_error renders cleanly", () => {
     const out = renderPrompt("X{{last_error}}Y", {
-      spec: "", progress: "", last_error: "", step: 1,
+      spec: "", progress: "", last_error: "", rotation_summary: "", step: 1,
     });
     expect(out).toBe("XY");
   });
