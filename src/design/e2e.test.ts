@@ -20,6 +20,9 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { runDesignSession } from "./orchestrator.ts";
 import type { IoAdapter } from "./io.ts";
 import { mergeConfig, type CcloopConfig } from "../config/schema.ts";
+import {
+  fakeAssistantMessage, fakeResultMessage, makeScriptedQuery,
+} from "../sdk/sdkMessages.fixtures.ts";
 
 // ===== Fixtures =====
 
@@ -70,69 +73,6 @@ function makeAdapter(opts: { inputs?: (string | null)[]; confirms?: boolean[] })
   };
 }
 
-type Step = () => SDKMessage[];
-
-/** Build a fake SDK query that runs `steps` in order, one per call. */
-function makeScriptedQuery(steps: Step[]): typeof import("@anthropic-ai/claude-agent-sdk").query {
-  let i = 0;
-  return (() => {
-    const idx = i < steps.length ? i : steps.length - 1;
-    const messages = idx >= 0 && steps[idx] ? steps[idx]!() : [];
-    i++;
-    async function* gen(): AsyncGenerator<SDKMessage> {
-      for (const m of messages) yield m;
-    }
-    return gen() as never;
-  }) as never;
-}
-
-function emptyResultMessage(): SDKMessage {
-  return {
-    type: "result",
-    subtype: "success",
-    session_id: "fake-session",
-    num_turns: 1,
-    total_cost_usd: 0,
-    duration_ms: 0,
-    duration_api_ms: 0,
-    is_error: false,
-    result: "",
-    usage: {
-      input_tokens: 0, output_tokens: 0,
-      cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
-      server_tool_use: { web_search_requests: 0 },
-    } as never,
-    permission_denials: [],
-    modelUsage: {} as never,
-    uuid: "00000000-0000-0000-0000-000000000000",
-  } as never as SDKMessage;
-}
-
-function assistantMessage(content: Array<
-  | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: unknown }
->): SDKMessage {
-  return {
-    type: "assistant",
-    session_id: "fake-session",
-    parent_tool_use_id: null,
-    uuid: "11111111-1111-1111-1111-111111111111",
-    message: {
-      id: "msg_1",
-      type: "message",
-      role: "assistant",
-      model: "fake",
-      stop_reason: "end_turn",
-      stop_sequence: null,
-      content: content as never,
-      usage: {
-        input_tokens: 0, output_tokens: 0,
-        cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
-        server_tool_use: { web_search_requests: 0 },
-      } as never,
-    } as never,
-  } as never as SDKMessage;
-}
 
 // ===== VR §4: empty fixture =====
 
@@ -155,14 +95,14 @@ describe("ccloop design — empty fixture", () => {
         mkdirSync(join(dir, ".ccloop", "design"), { recursive: true });
         writeFileSync(draftPath, finishedDraft);
         return [
-          assistantMessage([
+          fakeAssistantMessage([
             { type: "text", text: "Drafting the spec." },
             { type: "tool_use", id: "t1", name: "Write", input: {
               file_path: ".ccloop/design/spec.draft.md",
               content: finishedDraft,
             } },
           ]),
-          emptyResultMessage(),
+          fakeResultMessage(),
         ];
       },
     ]);
@@ -220,7 +160,7 @@ describe("ccloop design — populated fixture", () => {
         writeFileSync(draftPath, referencingDraft);
         return [
           // Read tool calls (transcript-only — no side effect needed).
-          assistantMessage([
+          fakeAssistantMessage([
             { type: "text", text: "Surveying the existing codebase." },
             { type: "tool_use", id: "r1", name: "Read", input: { file_path: "main.ts" } },
             { type: "tool_use", id: "r2", name: "Read", input: { file_path: "README.md" } },
@@ -230,7 +170,7 @@ describe("ccloop design — populated fixture", () => {
               content: referencingDraft,
             } },
           ]),
-          emptyResultMessage(),
+          fakeResultMessage(),
         ];
       },
     ]);

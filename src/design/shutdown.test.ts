@@ -22,6 +22,7 @@ import { runDesignSession } from "./orchestrator.ts";
 import type { IoAdapter } from "./io.ts";
 import type { CcloopConfig } from "../config/schema.ts";
 import { mergeConfig } from "../config/schema.ts";
+import { fakeResultMessage } from "../sdk/sdkMessages.fixtures.ts";
 
 const TEMPLATE =
   `# Spec\n\n- [ ] thing\n\n## Verification Requirements\n\nIt works.\n`;
@@ -58,32 +59,13 @@ function makeAdapter(opts: { inputs?: (string | null)[]; confirms?: boolean[] } 
   };
 }
 
-/** Fake `query` that records every prompt it sees and yields a single
- *  empty result message per call. The SDK signature is intentionally
- *  loose here — we only need an async iterator. */
+/** Records every prompt the SDK is invoked with, then yields a single
+ *  empty result so the orchestrator advances. */
 function makeRecordingQuery(seenPrompts: string[]): typeof import("@anthropic-ai/claude-agent-sdk").query {
   return ((args: { prompt: string }) => {
     seenPrompts.push(args.prompt);
     async function* gen(): AsyncGenerator<SDKMessage> {
-      yield {
-        type: "result",
-        subtype: "success",
-        session_id: "fake",
-        num_turns: 1,
-        total_cost_usd: 0,
-        duration_ms: 0,
-        duration_api_ms: 0,
-        is_error: false,
-        result: "",
-        usage: {
-          input_tokens: 0, output_tokens: 0,
-          cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
-          server_tool_use: { web_search_requests: 0 },
-        } as never,
-        permission_denials: [],
-        modelUsage: {} as never,
-        uuid: "00000000-0000-0000-0000-000000000000",
-      } as never as SDKMessage;
+      yield fakeResultMessage();
     }
     return gen() as never;
   }) as never;
@@ -205,25 +187,7 @@ describe("runDesignSession with shutdown", () => {
           mkdirSync(join(dir, ".ccloop", "design"), { recursive: true });
           writeFileSync(lastSessionPath, summaryBody);
         }
-        yield {
-          type: "result",
-          subtype: "success",
-          session_id: "fake",
-          num_turns: 1,
-          total_cost_usd: 0,
-          duration_ms: 0,
-          duration_api_ms: 0,
-          is_error: false,
-          result: "",
-          usage: {
-            input_tokens: 0, output_tokens: 0,
-            cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
-            server_tool_use: { web_search_requests: 0 },
-          } as never,
-          permission_denials: [],
-          modelUsage: {} as never,
-          uuid: "00000000-0000-0000-0000-000000000000",
-        } as never;
+        yield fakeResultMessage();
       }
       return gen() as never;
     }) as never;

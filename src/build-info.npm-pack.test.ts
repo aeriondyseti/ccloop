@@ -47,6 +47,10 @@ describe("npm tarball contents", () => {
     ).toEqual([]);
   });
 
+  test("ships no test-fixture modules", () => {
+    expect(files.filter((p) => /\.fixtures\.ts$/.test(p))).toEqual([]);
+  });
+
   test("ships core entrypoints", () => {
     for (const required of [
       "package.json",

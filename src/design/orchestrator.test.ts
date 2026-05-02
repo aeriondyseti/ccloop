@@ -11,12 +11,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { runDesignSession } from "./orchestrator.ts";
 import type { IoAdapter } from "./io.ts";
 import type { CcloopConfig } from "../config/schema.ts";
 import { mergeConfig } from "../config/schema.ts";
 import type { AskUserInput, AskUserResult } from "../mcp/ask-user.ts";
+import { makeQuietQuery } from "../sdk/sdkMessages.fixtures.ts";
 
 interface RecordedAdapter extends IoAdapter {
   log: string[];
@@ -62,38 +62,6 @@ function makeAdapter(opts: {
     },
     async close() { log.push("close"); },
   };
-}
-
-/** Build a fake `query` that yields a single empty result message and exits.
- *  The orchestrator will then advance to the user-input phase. */
-function makeQuietQuery(): typeof import("@anthropic-ai/claude-agent-sdk").query {
-  return ((_input: unknown) => {
-    async function* gen(): AsyncGenerator<SDKMessage> {
-      const result: SDKMessage = {
-        type: "result",
-        subtype: "success",
-        session_id: "fake-session",
-        num_turns: 1,
-        total_cost_usd: 0,
-        duration_ms: 0,
-        duration_api_ms: 0,
-        is_error: false,
-        result: "",
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          cache_read_input_tokens: 0,
-          cache_creation_input_tokens: 0,
-          server_tool_use: { web_search_requests: 0 },
-        } as never,
-        permission_denials: [],
-        modelUsage: {} as never,
-        uuid: "00000000-0000-0000-0000-000000000000",
-      } as never as SDKMessage;
-      yield result;
-    }
-    return gen() as never;
-  }) as never;
 }
 
 const TEMPLATE_CONTENT =
