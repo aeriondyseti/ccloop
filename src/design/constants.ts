@@ -29,12 +29,6 @@ export const DESIGN_ARTIFACT_PATHS: DesignPaths = {
 };
 
 /**
- * Design session metadata file.
- * Used for resume functionality.
- */
-export const DESIGN_SESSION_METADATA_PATH = "./.ccloop/design/session.json";
-
-/**
  * Default configuration values for design sessions.
  */
 export const DEFAULT_DESIGN_CONFIG = {

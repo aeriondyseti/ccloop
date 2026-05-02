@@ -4,6 +4,20 @@ All notable changes to ccloop. Newest at the top.
 
 ## Unreleased
 
+### Removed
+- **Dead `src/design/session.ts` module.** The session-metadata
+  persistence helpers (`saveSessionMetadata`,
+  `loadSessionMetadataIfExists`, `isSessionResumable`, etc.) were
+  exported from `src/design/index.ts` and tested in isolation, but
+  no production code path called them — the orchestrator's
+  resume-by-draft-on-disk pattern (`initializeDraft` is a no-op when
+  `spec.draft.md` exists) covers SPEC's "Resume model" requirement
+  without a session.json file. Drops the file, its test, the
+  associated `DesignSessionState` and `DesignSessionMetadata` types,
+  and `DESIGN_SESSION_METADATA_PATH` / `getDesignSessionMetadataPath`.
+  If/when conversation-history persistence ships, it'll need a
+  different shape anyway.
+
 ### Fixed
 - **Design events properly typed; `as any` casts removed.** The
   design event emitter cast every `type` string to `any` and every

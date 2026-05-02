@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { getDesignPaths, getDesignDir, getDesignSessionMetadataPath } from "./paths.ts";
+import { getDesignPaths, getDesignDir } from "./paths.ts";
 import { join } from "node:path";
 
 describe("getDesignPaths", () => {
@@ -39,11 +39,3 @@ describe("getDesignDir", () => {
   });
 });
 
-describe("getDesignSessionMetadataPath", () => {
-  test("returns session.json path", () => {
-    const cwd = "/home/user/project";
-    const path = getDesignSessionMetadataPath(cwd);
-
-    expect(path).toBe(join(cwd, ".ccloop", "design", "session.json"));
-  });
-});

@@ -19,19 +19,6 @@ export type DesignPhase =
   | "acceptance";
 
 /**
- * State of the design session.
- * Maps to different screens in the TUI.
- */
-export type DesignSessionState =
-  | "STARTING"      // Loading draft, initializing SDK session
-  | "ACTIVE"        // Agent is actively working, user can interact
-  | "ASKING"        // ask_user tool invoked, waiting for user input
-  | "VALIDATING"    // User accepted, running validateSpec on draft
-  | "PROMOTING"     // Validation passed, promoting draft to SPEC.md
-  | "DONE"          // Session completed (accepted or aborted)
-  | "ERROR";        // Unrecoverable error
-
-/**
  * Paths for design artifacts within ./.ccloop/design/
  */
 export interface DesignPaths {

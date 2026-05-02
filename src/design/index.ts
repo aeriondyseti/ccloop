@@ -5,41 +5,27 @@
  * ready for the build loop to consume.
  */
 
-// Types
 export type {
   DesignPhase,
-  DesignSessionState,
   DesignPaths,
   DesignConfig,
-  DesignSessionMetadata,
   DesignSessionResult,
   DesignEvent,
 } from "./types.ts";
 
-// Constants
 export {
   DESIGN_PHASES,
   DESIGN_ARTIFACT_PATHS,
-  DESIGN_SESSION_METADATA_PATH,
   DEFAULT_DESIGN_CONFIG,
 } from "./constants.ts";
 
-// Utilities
 export {
   getDesignPaths,
   getDesignDir,
-  getDesignSessionMetadataPath,
 } from "./paths.ts";
 
-// Prompts
-export {
-  DESIGN_SYSTEM_PROMPT,
-  PHASE_PROMPTS,
-  getPhasePrompt,
-  buildDesignPrompt,
-} from "./prompts.ts";
+export { DESIGN_SYSTEM_PROMPT } from "./prompts.ts";
 
-// Draft management
 export {
   initializeDraft,
   loadDraft,
@@ -49,29 +35,16 @@ export {
   saveDraft,
 } from "./draft.ts";
 
-// Event emission
 export {
   DesignEventEmitter,
   createDesignEventEmitter,
 } from "./events.ts";
 
-// Session management
-export {
-  saveSessionMetadata,
-  loadSessionMetadata,
-  loadSessionMetadataIfExists,
-  createSessionMetadata,
-  updateSessionMetadata,
-  isSessionResumable,
-} from "./session.ts";
-
-// Sandbox approver
 export {
   makeDesignApprover,
   type DesignApproverOptions,
 } from "./approver.ts";
 
-// Acceptance and validation
 export {
   acceptDraft,
   checkDraftValidity,
