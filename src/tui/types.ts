@@ -18,7 +18,18 @@ export type TurnEvent =
   | { kind: "thinking"; text: string; ts: string }
   | { kind: "tool_use"; tool: string; summary: string; ts: string }
   | { kind: "tool_result"; tool: string; ok: boolean; excerpt: string; ts: string }
+  | { kind: "todo_state"; todos: TodoItem[]; ts: string }
   | { kind: "idle"; ts: string; note: string };
+
+/** Snapshot of one entry in Claude's TodoWrite tool. The agent
+ *  maintains this list internally as its working plan; surfacing it
+ *  in the TUI lets the operator see what Claude *thinks* it's doing
+ *  vs. the static SPEC.md checklist. */
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  activeForm?: string;
+}
 
 /** A durable lifecycle event from events.jsonl — promoted into a
  *  transcript entry so the unified pane can render it as a typed
@@ -96,6 +107,13 @@ export interface TuiViewModel {
    *  header so an operator can see "12/47 done" at a glance — the
    *  template promises this and overnight runs need it most. */
   checklist: { done: number; total: number } | null;
+  /** Latest snapshot of Claude's TodoWrite list. Live during the
+   *  current step; the agent keeps writing it as its mental plan
+   *  evolves. Empty array when the step hasn't called TodoWrite yet
+   *  (or doesn't use it). Distinct from `checklist` — the SPEC
+   *  checklist is the user's static target; this is the agent's
+   *  in-flight working plan. */
+  claudeTodos: TodoItem[];
 }
 
 export const EMPTY_VIEW: TuiViewModel = {
@@ -124,4 +142,5 @@ export const EMPTY_VIEW: TuiViewModel = {
   done: null,
   controlsHint: "ctrl-c quit",
   checklist: null,
+  claudeTodos: [],
 };

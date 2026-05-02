@@ -153,7 +153,19 @@ export function project(input: ProjectorInput): TuiViewModel {
       : CONTROLS[tuiState],
     checklist:
       input.checklist && input.checklist.total > 0 ? input.checklist : null,
+    claudeTodos: latestTodoState(input.nowContent ?? []),
   };
+}
+
+/** Find the most recent todo_state event in the live stream. The agent
+ *  re-emits the full list every time it edits the plan, so the latest
+ *  occurrence is always authoritative; older ones are just history. */
+function latestTodoState(turns: TurnEvent[]): TuiViewModel["claudeTodos"] {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t && t.kind === "todo_state") return t.todos;
+  }
+  return [];
 }
 
 /** Merge lifecycle and turn events into a single chronological list.

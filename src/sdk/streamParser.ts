@@ -6,7 +6,7 @@
  * Pure with respect to time — the caller stamps `ts` so tests can pin
  * it.
  */
-import type { TurnEvent } from "../tui/types.ts";
+import type { TodoItem, TurnEvent } from "../tui/types.ts";
 import { truncateToWidth } from "../util/width.ts";
 
 export class StreamParser {
@@ -22,8 +22,9 @@ export class StreamParser {
       const content = inner.content;
       if (Array.isArray(content)) {
         for (const block of content) {
-          const ev = blockToEvent(block, this.toolNames, ts);
-          if (ev) events.push(ev);
+          for (const ev of blockToEvents(block, this.toolNames, ts)) {
+            events.push(ev);
+          }
         }
       }
     } else if (m.type === "user") {
@@ -40,17 +41,16 @@ export class StreamParser {
   }
 }
 
-function blockToEvent(
+function blockToEvents(
   block: unknown,
   toolNames: Map<string, string>,
   ts: string,
-): TurnEvent | null {
-  if (!block || typeof block !== "object") return null;
+): TurnEvent[] {
+  if (!block || typeof block !== "object") return [];
   const b = block as Record<string, unknown>;
   if (b.type === "text" && typeof b.text === "string") {
     const text = b.text.trim();
-    if (!text) return null;
-    return { kind: "assistant_text", text, ts };
+    return text ? [{ kind: "assistant_text", text, ts }] : [];
   }
   // Extended thinking: the SDK delivers reasoning as a `thinking`
   // block within the assistant message. Surface it so the operator
@@ -59,21 +59,54 @@ function blockToEvent(
   // (encrypted) are skipped: there's nothing useful to show.
   if (b.type === "thinking" && typeof b.thinking === "string") {
     const text = b.thinking.trim();
-    if (!text) return null;
-    return { kind: "thinking", text, ts };
+    return text ? [{ kind: "thinking", text, ts }] : [];
   }
   if (b.type === "tool_use") {
     const id = String(b.id ?? "");
     const name = String(b.name ?? "tool");
     if (id) toolNames.set(id, name);
-    return {
+    const events: TurnEvent[] = [{
       kind: "tool_use",
       tool: name,
       summary: summarizeToolInput(name, b.input),
       ts,
-    };
+    }];
+    // TodoWrite carries the agent's working plan in its `input.todos`
+    // array. Emit it as a structured `todo_state` event in addition
+    // to the generic tool_use so the TUI can render the live list.
+    if (name === "TodoWrite") {
+      const todos = parseTodoList(b.input);
+      if (todos !== null) events.push({ kind: "todo_state", todos, ts });
+    }
+    return events;
   }
-  return null;
+  return [];
+}
+
+/** Extract a TodoItem[] from a TodoWrite tool_use's `input` blob.
+ *  Returns null on shape mismatch so the parser can fall back to the
+ *  generic tool_use event without crashing on a malformed block. */
+export function parseTodoList(input: unknown): TodoItem[] | null {
+  if (!input || typeof input !== "object") return null;
+  const todos = (input as Record<string, unknown>).todos;
+  if (!Array.isArray(todos)) return null;
+  const out: TodoItem[] = [];
+  for (const raw of todos) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const content = typeof r.content === "string" ? r.content : "";
+    const status = r.status;
+    if (
+      content === "" ||
+      (status !== "pending" && status !== "in_progress" && status !== "completed")
+    ) {
+      continue;
+    }
+    const item: TodoItem = { content, status };
+    if (typeof r.activeForm === "string") item.activeForm = r.activeForm;
+    out.push(item);
+  }
+  return out;
 }
 
 function userBlockToEvent(

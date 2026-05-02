@@ -113,6 +113,69 @@ describe("StreamParser", () => {
     expect(out).toEqual([]);
   });
 
+  test("TodoWrite tool_use emits both tool_use and todo_state events", () => {
+    const p = new StreamParser();
+    const out = p.consume({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use", id: "tu_99", name: "TodoWrite",
+          input: { todos: [
+            { content: "Read SPEC", status: "completed", activeForm: "Reading SPEC" },
+            { content: "Write tests", status: "in_progress", activeForm: "Writing tests" },
+            { content: "Ship it", status: "pending" },
+          ] },
+        }],
+      },
+    }, TS);
+    expect(out.length).toBe(2);
+    expect(out[0]?.kind).toBe("tool_use");
+    expect(out[1]).toEqual({
+      kind: "todo_state",
+      ts: TS,
+      todos: [
+        { content: "Read SPEC", status: "completed", activeForm: "Reading SPEC" },
+        { content: "Write tests", status: "in_progress", activeForm: "Writing tests" },
+        { content: "Ship it", status: "pending" },
+      ],
+    });
+  });
+
+  test("TodoWrite with malformed input falls back to bare tool_use", () => {
+    const p = new StreamParser();
+    const out = p.consume({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use", id: "tu_1", name: "TodoWrite",
+          input: { /* missing todos */ },
+        }],
+      },
+    }, TS);
+    // Only the generic tool_use event — todo_state silently skipped.
+    expect(out.length).toBe(1);
+    expect(out[0]?.kind).toBe("tool_use");
+  });
+
+  test("TodoWrite skips items with invalid status", () => {
+    const p = new StreamParser();
+    const out = p.consume({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use", id: "x", name: "TodoWrite",
+          input: { todos: [
+            { content: "good", status: "pending" },
+            { content: "bad-status", status: "frobnicating" },
+            { content: "", status: "pending" }, // empty content
+          ] },
+        }],
+      },
+    }, TS);
+    const todoEv = out.find((e) => e.kind === "todo_state");
+    expect(todoEv && todoEv.kind === "todo_state" ? todoEv.todos.length : -1).toBe(1);
+  });
+
   test("ignores result/system message types", () => {
     const p = new StreamParser();
     expect(p.consume({ type: "result", subtype: "success" }, TS)).toEqual([]);
