@@ -36,7 +36,7 @@ Pinned terms used by this spec:
       multiple-choice widget in the TUI (arrow keys + Enter; Esc to
       provide freeform input), returns the user's selection(s) as
       the tool result.
-- [ ] **`ccloop design` subcommand.** New verb in the CLI. Starts a
+- [x] **`ccloop design` subcommand.** New verb in the CLI. Starts a
       design session: loads or creates `./.ccloop/design/spec.draft.md`
       seeded from `templates/SPEC.md`, opens a single SDK `query`
       session with the design system prompt, runs until user accepts
