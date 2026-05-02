@@ -86,6 +86,31 @@ describe("summarizeSession", () => {
     expect(out).toContain("(summary truncated)");
   });
 
+  test("returns empty string when timeoutMs elapses (no model output)", async () => {
+    // Iterator yields nothing and never returns; we rely on the
+    // timeout's AbortController to break us out. Bun's await-for-of
+    // on the abort signal raises an AbortError which the caller
+    // swallows.
+    const queryImpl = ((args: { options: { abortController?: AbortController } }) => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        await new Promise<void>((resolve) => {
+          args.options.abortController?.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        // Never yield anything; once aborted, just exit.
+      }
+      return gen() as never;
+    }) as never;
+    const start = Date.now();
+    const out = await summarizeSession({
+      cwd: "/tmp", resumeSessionId: asSessionId("s"),
+      queryImpl, timeoutMs: 50,
+    });
+    const elapsed = Date.now() - start;
+    expect(out).toBe("");
+    // Confirm we exited via the timeout, not by waiting forever.
+    expect(elapsed).toBeLessThan(1000);
+  });
+
   test("returns empty string on iterator error (best-effort)", async () => {
     const queryImpl = (() => {
       async function* gen(): AsyncGenerator<SDKMessage> {
