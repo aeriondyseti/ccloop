@@ -50,7 +50,7 @@ Pinned terms used by this spec:
       sandbox, not allowlist),
       `WebSearch`/`WebFetch`,
       and the `ask_user` MCP tool.
-- [ ] **Two-pane TUI layout.** Left pane: chat transcript (assistant
+- [x] **Two-pane TUI layout.** Left pane: chat transcript (assistant
       prose, tool-use summaries, user replies, `ask_user` widget when
       active). Right pane: live render of `spec.draft.md`,
       auto-scrolling to the most recently edited region. Header strip

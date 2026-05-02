@@ -10,11 +10,15 @@
  * (and is forced regardless of TTY state).
  */
 
+import React from "react";
+import { render } from "ink";
 import { loadConfig } from "../config/load.ts";
 import type { RunFlags } from "../config/flags.ts";
 import { runDesignSession } from "../design/orchestrator.ts";
 import { createStdioAdapter } from "../design/io-stdio.ts";
 import { loadOAuthToken } from "../auth/loadToken.ts";
+import { createDesignTuiBridge } from "../tui/design-bridge.ts";
+import { DesignDashboard } from "../tui/DesignDashboard.tsx";
 
 interface DesignFlags {
   help: boolean;
@@ -73,13 +77,45 @@ export async function runDesign(argv: string[]): Promise<number> {
   };
   process.on("SIGINT", onSigint);
 
+  // TUI mode is the default unless --no-tui is set, the user disabled
+  // it in ccloop.toml, or stdout/stdin aren't TTYs. Falling back to
+  // stdio in non-TTY environments keeps `ccloop design | tee log`
+  // and CI invocations sane.
+  const wantsTui = !flags.noTui
+    && config.design.enable_tui
+    && process.stdout.isTTY === true
+    && process.stdin.isTTY === true;
+
+  if (wantsTui) {
+    const bridge = createDesignTuiBridge();
+    const inkApp = render(
+      React.createElement(DesignDashboard, {
+        bridge, cwd,
+        onInterrupt: () => abortController.abort(),
+      }),
+      { exitOnCtrlC: false },
+    );
+    try {
+      const result = await runDesignSession({
+        cwd, config, io: bridge.adapter, abortController,
+      });
+      if (result.outcome === "accepted") return 0;
+      if (result.outcome === "aborted") return 130;
+      return 1;
+    } finally {
+      process.off("SIGINT", onSigint);
+      inkApp.unmount();
+      await inkApp.waitUntilExit().catch(() => undefined);
+    }
+  }
+
   const io = createStdioAdapter();
   try {
     const result = await runDesignSession({
       cwd, config, io, abortController,
     });
     if (result.outcome === "accepted") return 0;
-    if (result.outcome === "aborted") return 130; // conventional SIGINT exit code
+    if (result.outcome === "aborted") return 130;
     return 1;
   } finally {
     process.off("SIGINT", onSigint);
