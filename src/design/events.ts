@@ -22,12 +22,6 @@ export class DesignEventEmitter {
     });
   }
 
-  async phaseEnter(phase: DesignPhase): Promise<void> {
-    await this.logger.append({
-      type: "design_phase_enter", phase, step: 0, run_id: "",
-    });
-  }
-
   async askUserAsked(question: string): Promise<void> {
     await this.logger.append({
       type: "ask_user_asked", question, step: 0, run_id: "",

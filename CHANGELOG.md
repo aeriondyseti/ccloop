@@ -5,6 +5,14 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Removed
+- **Never-fired `design_phase_enter` event.** The emitter exposed
+  `phaseEnter()` and the `EventType` union listed
+  `design_phase_enter`, but the orchestrator doesn't track phase
+  transitions, so the event never fired in production. Removed the
+  emitter method, the event type, and the now-unused
+  `DesignSessionState` enum. SPEC.md updated to call out phase
+  tracking as future work; the dogfood spec's "Lifecycle events"
+  checkbox now lists the events that actually fire.
 - **Dead `src/design/session.ts` module.** The session-metadata
   persistence helpers (`saveSessionMetadata`,
   `loadSessionMetadataIfExists`, `isSessionResumable`, etc.) were

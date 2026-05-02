@@ -84,7 +84,6 @@ export interface DesignSessionResult {
  */
 export type DesignEvent =
   | { type: "design_session_start"; timestamp: string; phase: DesignPhase }
-  | { type: "design_phase_enter"; timestamp: string; phase: DesignPhase }
   | { type: "ask_user_asked"; timestamp: string; question: string }
   | { type: "ask_user_answered"; timestamp: string; selected: string[]; freeform?: string }
   | { type: "draft_edit"; timestamp: string; file_path: string }

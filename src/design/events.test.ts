@@ -49,15 +49,6 @@ describe("DesignEventEmitter", () => {
     expect(events[0].ts).toBeDefined();
   });
 
-  test("phaseEnter emits correct event", async () => {
-    const emitter = new DesignEventEmitter(testDir);
-    await emitter.phaseEnter("scope");
-
-    const events = await readEvents(testDir);
-    expect(events[0].type).toBe("design_phase_enter");
-    expect(events[0].phase).toBe("scope");
-  });
-
   test("askUserAsked emits correct event", async () => {
     const emitter = new DesignEventEmitter(testDir);
     await emitter.askUserAsked("Which approach should we use?");
@@ -143,16 +134,14 @@ describe("DesignEventEmitter", () => {
   test("multiple events are appended correctly", async () => {
     const emitter = new DesignEventEmitter(testDir);
     await emitter.sessionStart("vision");
-    await emitter.phaseEnter("users");
     await emitter.askUserAsked("What users?");
     await emitter.draftEdit("spec.draft.md");
 
     const events = await readEvents(testDir);
-    expect(events).toHaveLength(4);
+    expect(events).toHaveLength(3);
     expect(events[0].type).toBe("design_session_start");
-    expect(events[1].type).toBe("design_phase_enter");
-    expect(events[2].type).toBe("ask_user_asked");
-    expect(events[3].type).toBe("draft_edit");
+    expect(events[1].type).toBe("ask_user_asked");
+    expect(events[2].type).toBe("draft_edit");
   });
 
   test("emit allows custom events", async () => {

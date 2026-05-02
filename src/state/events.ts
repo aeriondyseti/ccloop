@@ -38,7 +38,6 @@ export type EventType =
    *  events; `run_id` is empty for design sessions because they don't
    *  carry one. */
   | "design_session_start"
-  | "design_phase_enter"
   | "ask_user_asked"
   | "ask_user_answered"
   | "draft_edit"

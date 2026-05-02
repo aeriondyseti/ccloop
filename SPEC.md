@@ -97,10 +97,15 @@ Pinned terms used by this spec:
       environments — chat only, no live draft pane).
 - [x] **Lifecycle events.** Emit to `./.ccloop/events.jsonl` (same
       file the build loop uses): `design_session_start`,
-      `design_phase_enter`, `ask_user_asked`, `ask_user_answered`,
-      `draft_edit`, `design_session_accept`, `design_session_abort`,
-      `design_session_end`. Event records include phase, turn count,
-      cost, cache rate.
+      `ask_user_asked`, `ask_user_answered`, `draft_edit`,
+      `design_session_accept`, `design_session_abort`,
+      `design_session_end`. (`design_phase_enter` is reserved for a
+      future phase-tracking implementation; the orchestrator does not
+      currently track phase transitions, so emitting it would be
+      misleading.) Event records include phase / turn count / cost
+      where the orchestrator has them — `design_session_start`
+      carries `phase`, `design_session_accept` carries `turn_count`
+      and `total_cost_usd`.
 - [x] **Tests.** Unit tests for: `ask_user` MCP tool input/output
       contract, draft sandbox enforcement (writes outside
       `./.ccloop/design/` rejected), promote-on-accept flow,
