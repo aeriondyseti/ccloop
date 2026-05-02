@@ -12,7 +12,6 @@
 import {
   query as defaultQuery,
   type Options,
-  type SDKMessage,
   type SDKAssistantMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { CcloopConfig } from "../config/schema.ts";
@@ -27,7 +26,7 @@ import {
 } from "./draft.ts";
 import { acceptDraft, formatValidationError, generateAcceptancePrompt, checkDraftValidity } from "./acceptance.ts";
 import { createDesignEventEmitter } from "./events.ts";
-import { effortToThinkingTokens } from "../sdk/runStep.ts";
+import { effortToThinkingTokens, extractAssistantText } from "../sdk/runStep.ts";
 import { asSessionId, type SessionId } from "../branded.ts";
 import type { IoAdapter } from "./io.ts";
 import type { DesignSessionResult } from "./types.ts";
@@ -245,29 +244,23 @@ async function handleAssistantMessage(
   io: IoAdapter,
   events: ReturnType<typeof createDesignEventEmitter>,
 ): Promise<void> {
-  const inner = msg.message;
-  const content = inner.content;
+  const content = msg.message.content;
   if (!Array.isArray(content)) return;
 
-  const textParts: string[] = [];
   for (const block of content) {
-    if (block.type === "text" && typeof block.text === "string") {
-      textParts.push(block.text);
-    } else if (block.type === "tool_use") {
-      io.showToolUse(block.name, summarizeToolInput(block.name, block.input));
-      if (FILE_EDIT_TOOLS.has(block.name)) {
-        // The agent just modified the draft (or another sandboxed file).
-        // Refresh the IoAdapter's view so the TUI right-pane re-renders.
-        const draft = await loadDraftIfExists(cwd);
-        if (draft !== null) {
-          io.draftUpdated(draft);
-          await events.draftEdit(extractFilePath(block.input) ?? "spec.draft.md");
-        }
+    if (block.type !== "tool_use") continue;
+    io.showToolUse(block.name, summarizeToolInput(block.name, block.input));
+    if (FILE_EDIT_TOOLS.has(block.name)) {
+      const draft = await loadDraftIfExists(cwd);
+      if (draft !== null) {
+        io.draftUpdated(draft);
+        await events.draftEdit(extractFilePath(block.input) ?? "spec.draft.md");
       }
     }
   }
-  const combined = textParts.join("\n").trim();
-  if (combined) io.showAssistantText(combined);
+
+  const text = extractAssistantText(content);
+  if (text) io.showAssistantText(text);
 }
 
 function summarizeToolInput(name: string, raw: unknown): string {

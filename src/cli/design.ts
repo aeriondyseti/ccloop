@@ -3,11 +3,6 @@
  *
  * Parses argv, loads config + auth, picks an IoAdapter (stdio or TUI),
  * and hands off to runDesignSession in src/design/orchestrator.ts.
- *
- * MVP scope: stdio adapter is the only adapter wired here. The
- * two-pane Ink TUI ships in src/tui/DesignDashboard.tsx and will be
- * threaded in once it lands; for now `--no-tui` is the only path
- * (and is forced regardless of TTY state).
  */
 
 import React from "react";
@@ -16,16 +11,18 @@ import { loadConfig } from "../config/load.ts";
 import type { RunFlags } from "../config/flags.ts";
 import { runDesignSession } from "../design/orchestrator.ts";
 import { createStdioAdapter } from "../design/io-stdio.ts";
-import { loadOAuthToken } from "../auth/loadToken.ts";
+import { injectAuth } from "../auth/inject.ts";
 import { createDesignTuiBridge } from "../tui/design-bridge.ts";
 import { DesignDashboard } from "../tui/DesignDashboard.tsx";
-import { createShutdownSignal } from "../design/shutdown.ts";
+import { createShutdownSignal, type ShutdownSignal } from "../design/shutdown.ts";
 
 interface DesignFlags {
   help: boolean;
   noTui: boolean;
   modelOverride?: string;
 }
+
+const FORCE_WINDOW_MS = 2000;
 
 export async function runDesign(argv: string[]): Promise<number> {
   let flags: DesignFlags;
@@ -41,18 +38,7 @@ export async function runDesign(argv: string[]): Promise<number> {
     return 0;
   }
 
-  // OAuth token isn't strictly required (ANTHROPIC_API_KEY also works);
-  // loadOAuthToken returns a discovered token or null. The SDK reads
-  // CLAUDE_CODE_OAUTH_TOKEN from the environment, so populate it when
-  // we discovered one through the keychain / credentials file.
-  try {
-    const token = loadOAuthToken();
-    if (token && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = token.token;
-    }
-  } catch {
-    // surface auth issues from the SDK instead.
-  }
+  injectAuth();
 
   const cwd = process.cwd();
   const designRunFlags: RunFlags = { cont: false, yes: false };
@@ -72,29 +58,9 @@ export async function runDesign(argv: string[]): Promise<number> {
 
   const abortController = new AbortController();
   const shutdown = createShutdownSignal({ abortController });
-  const FORCE_WINDOW_MS = 2000;
-  let firstSigintAt = 0;
-  const onSigint = () => {
-    const now = Date.now();
-    if (firstSigintAt === 0) {
-      firstSigintAt = now;
-      shutdown.requestGraceful();
-      process.stderr.write(
-        "\n[ccloop design] Ctrl+C — writing session summary; press again within 2s to force quit.\n",
-      );
-      return;
-    }
-    if (now - firstSigintAt <= FORCE_WINDOW_MS) {
-      shutdown.forceAbort();
-      process.stderr.write("\n[ccloop design] Force quit.\n");
-    }
-  };
-  process.on("SIGINT", onSigint);
+  const interrupt = createInterruptHandler(shutdown);
+  process.on("SIGINT", interrupt);
 
-  // TUI mode is the default unless --no-tui is set, the user disabled
-  // it in ccloop.toml, or stdout/stdin aren't TTYs. Falling back to
-  // stdio in non-TTY environments keeps `ccloop design | tee log`
-  // and CI invocations sane.
   const wantsTui = !flags.noTui
     && config.design.enable_tui
     && process.stdout.isTTY === true
@@ -102,10 +68,15 @@ export async function runDesign(argv: string[]): Promise<number> {
 
   if (wantsTui) {
     const bridge = createDesignTuiBridge();
+    // Ink puts stdin in raw mode, which suppresses Node's SIGINT
+    // synthesis — the OS-level handler installed above won't fire
+    // until raw mode is released. Route the in-TUI Ctrl+C keystroke
+    // through the same two-tier handler so the graceful summary
+    // path runs in TUI mode too.
     const inkApp = render(
       React.createElement(DesignDashboard, {
         bridge, cwd,
-        onInterrupt: () => abortController.abort(),
+        onInterrupt: interrupt,
       }),
       { exitOnCtrlC: false },
     );
@@ -113,11 +84,9 @@ export async function runDesign(argv: string[]): Promise<number> {
       const result = await runDesignSession({
         cwd, config, io: bridge.adapter, abortController, shutdown,
       });
-      if (result.outcome === "accepted") return 0;
-      if (result.outcome === "aborted") return 130;
-      return 1;
+      return exitCodeFor(result.outcome);
     } finally {
-      process.off("SIGINT", onSigint);
+      process.off("SIGINT", interrupt);
       inkApp.unmount();
       await inkApp.waitUntilExit().catch(() => undefined);
     }
@@ -128,13 +97,36 @@ export async function runDesign(argv: string[]): Promise<number> {
     const result = await runDesignSession({
       cwd, config, io, abortController, shutdown,
     });
-    if (result.outcome === "accepted") return 0;
-    if (result.outcome === "aborted") return 130;
-    return 1;
+    return exitCodeFor(result.outcome);
   } finally {
-    process.off("SIGINT", onSigint);
+    process.off("SIGINT", interrupt);
     await io.close();
   }
+}
+
+function exitCodeFor(outcome: "accepted" | "aborted" | "error"): number {
+  if (outcome === "accepted") return 0;
+  if (outcome === "aborted") return 130;
+  return 1;
+}
+
+function createInterruptHandler(shutdown: ShutdownSignal): () => void {
+  let firstAt = 0;
+  return () => {
+    const now = Date.now();
+    if (firstAt === 0) {
+      firstAt = now;
+      shutdown.requestGraceful();
+      process.stderr.write(
+        "\n[ccloop design] Ctrl+C — writing session summary; press again within 2s to force quit.\n",
+      );
+      return;
+    }
+    if (now - firstAt <= FORCE_WINDOW_MS) {
+      shutdown.forceAbort();
+      process.stderr.write("\n[ccloop design] Force quit.\n");
+    }
+  };
 }
 
 function parseDesignFlags(argv: string[]): DesignFlags {

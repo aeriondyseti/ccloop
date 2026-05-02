@@ -13,7 +13,7 @@
 
 import { Box, Text, useInput } from "ink";
 import { ScrollView, type ScrollViewRef } from "ink-scroll-view";
-import React, { useRef, useState, useSyncExternalStore } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   Frame, Pane, Header, useFocusCycle, useScrollKeys, useAutoTail,
   useKeyboardAvailable, useCtrlC,
@@ -60,10 +60,10 @@ export function DesignDashboard({ bridge, cwd, onInterrupt }: DesignDashboardPro
         cwd={cwd}
       />
       <Box flexDirection="row" flexGrow={1} flexShrink={1}>
-        <Box flexDirection="column" flexGrow={1} flexShrink={1} width="50%">
+        <Box width="50%" flexShrink={1}>
           <TranscriptPane state={state} focused={focus === "transcript"} bridge={bridge} />
         </Box>
-        <Box flexDirection="column" flexGrow={1} flexShrink={1} width="50%">
+        <Box width="50%" flexShrink={1}>
           <DraftPane draft={state.draft} focused={focus === "draft"} />
         </Box>
       </Box>
@@ -84,13 +84,13 @@ interface TranscriptPaneProps {
 function TranscriptPane({ state, focused, bridge }: TranscriptPaneProps): React.ReactElement {
   const ref = useRef<ScrollViewRef>(null);
   const userScrolledRef = useRef(false);
-  // The transcript grows as the agent emits text, the user replies, and
-  // info/error banners arrive. Always tail unless the user manually
-  // scrolled up.
   useAutoTail(state.transcript.length, userScrolledRef, ref);
-  // Don't grab arrow keys when an interactive widget is active — the
-  // widget owns those keys.
-  const widgetActive = state.pendingAsk !== null || state.pendingConfirm !== null;
+  // Interactive widgets own arrow keys, so suppress scroll capture
+  // while one is rendered.
+  const widgetActive =
+    state.pendingAsk !== null ||
+    state.pendingConfirm !== null ||
+    state.pendingInput !== null;
   useScrollKeys({ focused: focused && !widgetActive, userScrolledRef, scrollRef: ref });
 
   const titleRight = focused ? "tab to draft" : "tab to focus";
@@ -99,25 +99,25 @@ function TranscriptPane({ state, focused, bridge }: TranscriptPaneProps): React.
     <Pane title="transcript" role="focusable" focused={focused}
           titleRight={titleRight} flexGrow={1} flexShrink={1}>
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-          <ScrollView ref={ref}>
-            {state.transcript.map((e, i) => (
-              <TranscriptRow key={i} entry={e} />
-            ))}
-          </ScrollView>
-        </Box>
-        {state.pendingAsk ? (
-          <AskWidget bridge={bridge} />
-        ) : state.pendingConfirm ? (
-          <ConfirmWidget bridge={bridge} />
-        ) : state.pendingInput ? (
-          <InputWidget bridge={bridge} />
-        ) : (
-          <Text dimColor>(agent is working…)</Text>
-        )}
+        <ScrollView ref={ref}>
+          {state.transcript.map((e, i) => (
+            <TranscriptRow key={i} entry={e} />
+          ))}
+        </ScrollView>
       </Box>
+      {renderActiveWidget(state, bridge)}
     </Pane>
   );
+}
+
+function renderActiveWidget(
+  state: ReturnType<DesignTuiBridge["getState"]>,
+  bridge: DesignTuiBridge,
+): React.ReactElement {
+  if (state.pendingAsk) return <AskWidget bridge={bridge} />;
+  if (state.pendingConfirm) return <ConfirmWidget bridge={bridge} />;
+  if (state.pendingInput) return <InputWidget bridge={bridge} />;
+  return <Text dimColor>(agent is working…)</Text>;
 }
 
 function TranscriptRow({ entry }: { entry: TranscriptEntry }): React.ReactElement {
@@ -140,13 +140,10 @@ function TranscriptRow({ entry }: { entry: TranscriptEntry }): React.ReactElemen
 function DraftPane({ draft, focused }: { draft: string; focused: boolean }): React.ReactElement {
   const ref = useRef<ScrollViewRef>(null);
   const userScrolledRef = useRef(false);
-  // Auto-tail by line count proxies "scroll to most recently edited" —
-  // edits typically extend the draft. A future iteration can track
-  // diff regions, but the spec only asks for "auto-scrolling to the
-  // most recently edited region", and a tailing right pane satisfies
-  // the common case (append/extend).
-  const lineCount = draft.length === 0 ? 0 : draft.split("\n").length;
-  useAutoTail(lineCount, userScrolledRef, ref);
+  // Auto-tail proxies "scroll to most recently edited" — edits
+  // typically extend the draft, so tailing covers the common case.
+  const lines = draft.length === 0 ? [] : draft.split("\n");
+  useAutoTail(lines.length, userScrolledRef, ref);
   useScrollKeys({ focused, userScrolledRef, scrollRef: ref });
 
   const titleRight = focused ? "tab to transcript" : "tab to focus";
@@ -154,11 +151,11 @@ function DraftPane({ draft, focused }: { draft: string; focused: boolean }): Rea
   return (
     <Pane title="spec.draft.md" role="focusable" focused={focused}
           titleRight={titleRight} flexGrow={1} flexShrink={1}>
-      {draft.length === 0 ? (
+      {lines.length === 0 ? (
         <Text dimColor>(empty draft)</Text>
       ) : (
         <ScrollView ref={ref}>
-          {draft.split("\n").map((line, i) => (
+          {lines.map((line, i) => (
             <Text key={i}>{line || " "}</Text>
           ))}
         </ScrollView>
@@ -177,6 +174,16 @@ function AskWidget({ bridge }: { bridge: DesignTuiBridge }): React.ReactElement 
   const [freeformMode, setFreeformMode] = useState(false);
   const [freeformText, setFreeformText] = useState("");
   const kb = useKeyboardAvailable();
+
+  // Reset interaction state on each new question — the widget stays
+  // mounted (rendering nothing while ask is null) and would otherwise
+  // carry over the previous cursor / picks / freeform state.
+  useEffect(() => {
+    setCursor(0);
+    setPicked(new Set());
+    setFreeformMode(false);
+    setFreeformText("");
+  }, [ask?.input.question]);
 
   useInput((input, key) => {
     if (!ask) return;

@@ -60,10 +60,7 @@ export function createStdioAdapter(opts: StdioAdapterOptions = {}): IoAdapter {
     showError(text) {
       stderr.write(`\n[error] ${text}\n`);
     },
-    draftUpdated(_content) {
-      // Stdio mode doesn't show a live draft pane; the agent will
-      // mention edits in its prose. No-op here is intentional.
-    },
+    draftUpdated() { /* no live pane in stdio mode */ },
     async askUser(input: AskUserInput): Promise<AskUserResult> {
       write(`\n? ${input.question}\n`);
       input.options.forEach((opt, i) => {

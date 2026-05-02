@@ -11,6 +11,11 @@
  */
 import type { IoAdapter } from "../design/io.ts";
 import type { AskUserInput, AskUserResult } from "../mcp/ask-user.ts";
+import { EventBus } from "../loop/eventBus.ts";
+
+/** Cap on transcript length so a long session doesn't grow unbounded
+ *  in the bridge store. Mirrors the build loop's LOG_CAP in run.ts. */
+const TRANSCRIPT_CAP = 500;
 
 export type TranscriptEntry =
   | { kind: "assistant"; text: string }
@@ -57,7 +62,7 @@ export interface DesignTuiBridge {
 }
 
 export function createDesignTuiBridge(): DesignTuiBridge {
-  const listeners = new Set<() => void>();
+  const bus = new EventBus<void>();
   let state: DesignTuiState = {
     transcript: [],
     draft: "",
@@ -67,29 +72,33 @@ export function createDesignTuiBridge(): DesignTuiBridge {
     startedAt: Date.now(),
   };
 
-  function emit(): void {
-    for (const l of listeners) l();
-  }
   function update(mutator: (s: DesignTuiState) => DesignTuiState): void {
     state = mutator(state);
-    emit();
+    bus.emit();
+  }
+  function appendTranscript(entry: TranscriptEntry): void {
+    update((s) => ({
+      ...s,
+      transcript: [...s.transcript, entry].slice(-TRANSCRIPT_CAP),
+    }));
   }
 
   const adapter: IoAdapter = {
     showAssistantText(text) {
       if (!text.trim()) return;
-      update((s) => ({ ...s, transcript: [...s.transcript, { kind: "assistant", text }] }));
+      appendTranscript({ kind: "assistant", text });
     },
     showToolUse(name, summary) {
-      update((s) => ({ ...s, transcript: [...s.transcript, { kind: "tool", name, summary }] }));
+      appendTranscript({ kind: "tool", name, summary });
     },
     showInfo(text) {
-      update((s) => ({ ...s, transcript: [...s.transcript, { kind: "info", text }] }));
+      appendTranscript({ kind: "info", text });
     },
     showError(text) {
-      update((s) => ({ ...s, transcript: [...s.transcript, { kind: "error", text }] }));
+      appendTranscript({ kind: "error", text });
     },
     draftUpdated(content) {
+      if (content === state.draft) return;
       update((s) => ({ ...s, draft: content }));
     },
     askUser(input) {
@@ -115,10 +124,7 @@ export function createDesignTuiBridge(): DesignTuiBridge {
 
   return {
     adapter,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => { listeners.delete(listener); };
-    },
+    subscribe: (listener) => bus.subscribe(listener),
     getState() { return state; },
     submitAsk(result) {
       const pending = state.pendingAsk;
@@ -137,10 +143,9 @@ export function createDesignTuiBridge(): DesignTuiBridge {
       if (!pending) return;
       const text = line?.trim() ?? "";
       if (line !== null && text.length > 0) {
-        update((s) => ({ ...s, pendingInput: null, transcript: [...s.transcript, { kind: "user", text }] }));
-      } else {
-        update((s) => ({ ...s, pendingInput: null }));
+        appendTranscript({ kind: "user", text });
       }
+      update((s) => ({ ...s, pendingInput: null }));
       pending.resolve(line);
     },
   };

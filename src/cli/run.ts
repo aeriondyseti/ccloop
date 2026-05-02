@@ -20,7 +20,7 @@ import { runLoop } from "../loop/orchestrator.ts";
 import { createPauseGate } from "../loop/pauseGate.ts";
 import { EventBus } from "../loop/eventBus.ts";
 import { UsageClient } from "../usage/client.ts";
-import { loadOAuthToken } from "../auth/loadToken.ts";
+import { injectAuth } from "../auth/inject.ts";
 import { Dashboard, type MenuKey } from "../tui/Dashboard.tsx";
 import { project } from "../tui/projector.ts";
 import { EMPTY_VIEW } from "../tui/types.ts";
@@ -100,23 +100,18 @@ export async function runRun(argv: string[]): Promise<number> {
   }
 
   // 3. Auth gate.
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-  const discovered = loadOAuthToken();
-  const token = discovered?.token ?? "";
-  if (!token && !apiKey) {
+  const auth = injectAuth();
+  if (!auth.ok) {
     process.stderr.write(
       "ccloop: missing auth. Set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token` for a long-lived headless token), log in via `claude /login`, or set ANTHROPIC_API_KEY.\n",
     );
     return 2;
   }
-  if (token && discovered && discovered.source !== "env") {
-    // Make the discovered token visible to the SDK regardless of whether
-    // it does its own discovery, and tell the user where it came from.
-    process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
-    const where =
-      discovered.source === "keychain-macos"
-        ? `macOS keychain (${discovered.detail})`
-        : `${discovered.detail}`;
+  const d = auth.discovered;
+  if (d && d.source !== "env") {
+    const where = d.source === "keychain-macos"
+      ? `macOS keychain (${d.detail})`
+      : d.detail;
     process.stderr.write(`ccloop: using OAuth token from ${where}\n`);
   }
 
@@ -280,8 +275,8 @@ export async function runRun(argv: string[]): Promise<number> {
     }
   }
 
-  const usageClient = token
-    ? new UsageClient({ token })
+  const usageClient = auth.discovered
+    ? new UsageClient({ token: auth.discovered.token })
     : null;
 
   // 8. SIGINT/SIGTERM handler — propagate via AbortController.

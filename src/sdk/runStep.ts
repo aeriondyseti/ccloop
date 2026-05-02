@@ -254,7 +254,7 @@ function accumulateUsage(into: StepUsage, raw: NonNullableUsage): void {
 /** Extract concatenated text from an APIAssistantMessage's `content`.
  *  The Anthropic SDK types `content` as a discriminated union of
  *  ContentBlock variants; we only pull from `text` blocks. */
-function extractAssistantText(content: SDKAssistantMessage["message"]["content"]): string {
+export function extractAssistantText(content: SDKAssistantMessage["message"]["content"]): string {
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content) {
