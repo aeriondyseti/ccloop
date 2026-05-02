@@ -232,6 +232,16 @@ function accumulateUsage(into: StepUsage, raw: NonNullableUsage): void {
   into.output_tokens += raw.output_tokens;
   into.cache_read_input_tokens += raw.cache_read_input_tokens;
   into.cache_creation_input_tokens += raw.cache_creation_input_tokens;
+  // Track the heaviest single inference's input-side total. The
+  // sums above conflate work across all turns (cache reads recur
+  // each turn) so they overstate the model's actual context window
+  // utilization by a factor of num_turns. The peak is what the
+  // model saw at one moment — the right number to gate rotation on.
+  const inferenceInput =
+    raw.input_tokens + raw.cache_read_input_tokens + raw.cache_creation_input_tokens;
+  if (inferenceInput > (into.peak_input_tokens ?? 0)) {
+    into.peak_input_tokens = inferenceInput;
+  }
 }
 
 /** Extract concatenated text from an APIAssistantMessage's `content`.

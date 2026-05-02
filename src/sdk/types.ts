@@ -26,6 +26,18 @@ export interface StepUsage {
   output_tokens: number;
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
+  /** Peak input-side token count observed for any single API call
+   *  within this step (`input_tokens + cache_read + cache_creation`
+   *  on the heaviest assistant message). Approximates the prompt
+   *  prefix size at its worst moment — the actual context the model
+   *  saw on one inference. The other fields are sums across all
+   *  inferences in the step, which inflate dramatically with turn
+   *  count (a 200K prefix re-read 20 times reports 4M). Use this for
+   *  context-window utilization decisions; use the sums for
+   *  cumulative billing. Optional for back-compat with step records
+   *  written before this field existed; consumers should fall back
+   *  to the sum (`inputContextTokens`). */
+  peak_input_tokens?: number;
 }
 
 export interface StepResult {
@@ -56,6 +68,7 @@ export function emptyUsage(): StepUsage {
     output_tokens: 0,
     cache_read_input_tokens: 0,
     cache_creation_input_tokens: 0,
+    peak_input_tokens: 0,
   };
 }
 
@@ -68,10 +81,15 @@ export function cacheHitRate(u: StepUsage): number {
   return u.cache_read_input_tokens / denom;
 }
 
-/** Input-side token count for one step's usage — counts what was
- *  fed into the model, not what came back. Approximates the size of
- *  the resumed-session prefix when this is the most recent step. */
+/** Peak per-inference input size for this step — the closest signal
+ *  to "how much context did the model actually see at the worst
+ *  moment." Use this to decide whether to rotate the session or to
+ *  show a context-window bar; do NOT use the per-step sums in
+ *  StepUsage, which double-count cache reads across every turn (a
+ *  200K prefix re-read 20 times sums to 4M). Falls back to the sum
+ *  for legacy step records that predate peak tracking. */
 export function inputContextTokens(u: StepUsage): number {
+  if (u.peak_input_tokens && u.peak_input_tokens > 0) return u.peak_input_tokens;
   return u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
 }
 

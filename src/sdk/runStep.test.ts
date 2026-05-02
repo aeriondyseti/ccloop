@@ -155,6 +155,56 @@ describe("runStep pause_turn continuations", () => {
   });
 });
 
+describe("peak input tracking", () => {
+  test("peak_input_tokens reflects the heaviest single inference, not the sum", async () => {
+    const cfg = structuredClone(DEFAULTS);
+    cfg.claude.max_continuations_per_step = 0;
+    // Three assistant messages within the same SDK call: prefix grows
+    // from 50K → 150K → 80K. Sum is 280K (would clip the 200K window
+    // by twice over) but peak is 150K (the realistic prompt size).
+    const fq = fakeQuery([
+      [
+        {
+          type: "assistant",
+          session_id: "s1",
+          message: {
+            stop_reason: null,
+            content: [{ type: "text", text: "step 1" }],
+            usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 49_900, cache_creation_input_tokens: 0 },
+          },
+        },
+        {
+          type: "assistant",
+          session_id: "s1",
+          message: {
+            stop_reason: null,
+            content: [{ type: "text", text: "step 2" }],
+            usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 149_900, cache_creation_input_tokens: 0 },
+          },
+        },
+        {
+          type: "assistant",
+          session_id: "s1",
+          message: {
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "step 3" }],
+            usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 79_900, cache_creation_input_tokens: 0 },
+          },
+        },
+        mkResultMsg({ stopReason: "end_turn", sessionId: "s1" }),
+      ],
+    ]);
+    const r = await runStep(baseInput(cfg, fq.impl));
+    expect(r.usage.peak_input_tokens).toBe(150_000);
+    // Sum is the cumulative billing — 280K — confirming peak ≠ sum.
+    const sum =
+      r.usage.input_tokens +
+      r.usage.cache_read_input_tokens +
+      r.usage.cache_creation_input_tokens;
+    expect(sum).toBe(280_000);
+  });
+});
+
 describe("post-stream throw handling", () => {
   /** Build a queryImpl that yields scripted messages, then throws.
    *  Mirrors the SDK behaviour where the Claude Code CLI subprocess
