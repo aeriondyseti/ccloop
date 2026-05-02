@@ -493,6 +493,75 @@ describe("LoopDriver.stepOnce", () => {
     }
   });
 
+  test("proactive rotation captures a session summary into state.rotation_summary", async () => {
+    cfg.claude.max_steps_per_session = 1; // rotate after step 1
+    const paths = runtimePaths(dir);
+    let summarizeCalls = 0;
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({ session_id: asSessionId("hot") }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+      summarizeSession: async (input) => {
+        summarizeCalls += 1;
+        expect(input.resumeSessionId).toBe(asSessionId("hot"));
+        return "Did vision phase. Drafting users next.";
+      },
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(summarizeCalls).toBe(1);
+    expect(state.session_id).toBeNull();
+    expect(state.rotation_summary).toBe("Did vision phase. Drafting users next.");
+  });
+
+  test("rotation_summary is consumed once: the next step renders + clears it", async () => {
+    // Disable rotation triggers so the test isolates the consume path.
+    cfg.claude.max_steps_per_session = 0;
+    cfg.claude.context_rotate_threshold = 0;
+    const paths = runtimePaths(dir);
+    const prompts: string[] = [];
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async (input) => {
+        prompts.push(input.prompt);
+        return mkResult({ session_id: asSessionId("alive") });
+      },
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    state.rotation_summary = "carry-over context here";
+    await driver.stepOnce(state);
+    // Rendered into step 1's prompt; field cleared after consumption.
+    expect(prompts[0]).toContain("carry-over context here");
+    expect(state.rotation_summary).toBeNull();
+    await driver.stepOnce(state);
+    // Step 2 saw no summary because step 1 consumed it.
+    expect(prompts[1]).not.toContain("carry-over context here");
+  });
+
+  test("context_overflow rotation does NOT call summarize (session is wedged)", async () => {
+    const paths = runtimePaths(dir);
+    let summarizeCalls = 0;
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({
+        is_error: true,
+        final_text: "Prompt is too long",
+      }),
+      headSha: async () => asSha(""),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: false, sha: asSha(""), subject: "" }),
+      summarizeSession: async () => { summarizeCalls += 1; return "should not happen"; },
+    });
+    const state = await driver.loadOrInitState();
+    state.session_id = asSessionId("poisoned");
+    await driver.stepOnce(state);
+    expect(state.session_id).toBeNull();
+    expect(summarizeCalls).toBe(0);
+    expect(state.rotation_summary).toBeNull();
+  });
+
   test("context_rotate_threshold below watermark keeps session", async () => {
     cfg.claude.context_rotate_threshold = 0.90;
     cfg.claude.max_steps_per_session = 0;

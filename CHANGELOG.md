@@ -5,6 +5,19 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Added
+- **Session compaction on rotation.** The proactive rotation paths
+  (step-cap and context-threshold) now summarize the expiring SDK
+  session before clearing it. A one-shot query
+  (`src/sdk/summarize.ts`) asks the model for a 300-word
+  self-summary of goal, in-flight work, decisions, and gotchas; the
+  result lands in `state.rotation_summary` and is rendered into the
+  next step's prompt under a "Picking up from a rotated session"
+  heading via the new `{{rotation_summary}}` template slot. The
+  field is cleared after one consumption so subsequent steps don't
+  replay the same summary. Reactive `context_overflow` rotations
+  still skip summarization — the wedged session can't answer.
+  Replaces the hard-rotate tech debt that lost in-flight context
+  every time the loop crossed a rotation threshold.
 - **Surface Claude's TodoWrite plan in the build TUI.** The
   `StreamParser` now extracts a `TodoWrite` tool_use's `input.todos`
   array into a typed `todo_state` turn event in addition to the

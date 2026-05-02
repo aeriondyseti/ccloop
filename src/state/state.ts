@@ -72,6 +72,11 @@ export interface CcloopState {
   guardrail_trip: GuardrailTripInfo | null;
   last_failure: StepFailure | null;
   worktree: WorktreeInfo | null;
+  /** Summary captured from a session right before it was rotated.
+   *  Rendered into the next step's prompt as `{{rotation_summary}}`
+   *  so the fresh session inherits the model's running picture
+   *  instead of starting blank. Cleared after one consumption. */
+  rotation_summary: string | null;
 }
 
 export class StateError extends Error {}
@@ -95,6 +100,7 @@ export function freshState(now: Date = new Date()): CcloopState {
     guardrail_trip: null,
     last_failure: null,
     worktree: null,
+    rotation_summary: null,
   };
 }
 
