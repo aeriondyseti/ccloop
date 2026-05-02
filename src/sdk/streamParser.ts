@@ -52,6 +52,16 @@ function blockToEvent(
     if (!text) return null;
     return { kind: "assistant_text", text, ts };
   }
+  // Extended thinking: the SDK delivers reasoning as a `thinking`
+  // block within the assistant message. Surface it so the operator
+  // can see *why* the model reached a decision — the exact signal
+  // you want when a step is misbehaving. Redacted-thinking blocks
+  // (encrypted) are skipped: there's nothing useful to show.
+  if (b.type === "thinking" && typeof b.thinking === "string") {
+    const text = b.thinking.trim();
+    if (!text) return null;
+    return { kind: "thinking", text, ts };
+  }
   if (b.type === "tool_use") {
     const id = String(b.id ?? "");
     const name = String(b.name ?? "tool");

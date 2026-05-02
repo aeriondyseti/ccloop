@@ -174,6 +174,8 @@ function turnTitle(last: TurnEvent): string {
     case "tool_result":
       return `transcript · ${last.ok ? "✓" : "✗"} ${last.tool}`;
     case "assistant_text":
+      return "transcript · ◌ assistant";
+    case "thinking":
       return "transcript · ◌ thinking";
     case "turn_start":
       return `transcript · turn ${last.turn}`;
@@ -204,6 +206,13 @@ function TurnRow({ event }: { event: TurnEvent }): React.ReactElement {
         <Box flexDirection="column" marginTop={1}>
           <Text color="magenta" dimColor>assistant</Text>
           <Text color="magenta">{event.text}</Text>
+        </Box>
+      );
+    case "thinking":
+      return (
+        <Box flexDirection="column" marginTop={1} paddingLeft={2}>
+          <Text color="gray" dimColor>thinking</Text>
+          <Text color="gray" dimColor italic>:: {event.text} ::</Text>
         </Box>
       );
     case "tool_use":

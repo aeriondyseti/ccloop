@@ -15,6 +15,7 @@ export type TuiState =
 export type TurnEvent =
   | { kind: "turn_start"; turn: number; ts: string }
   | { kind: "assistant_text"; text: string; ts: string }
+  | { kind: "thinking"; text: string; ts: string }
   | { kind: "tool_use"; tool: string; summary: string; ts: string }
   | { kind: "tool_result"; tool: string; ok: boolean; excerpt: string; ts: string }
   | { kind: "idle"; ts: string; note: string };

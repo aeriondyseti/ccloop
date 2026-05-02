@@ -19,6 +19,30 @@ describe("StreamParser", () => {
     ]);
   });
 
+  test("assistant thinking block → thinking turn event", () => {
+    const p = new StreamParser();
+    const out = p.consume({
+      type: "assistant",
+      message: {
+        content: [{ type: "thinking", thinking: "let me reconsider" }],
+      },
+    }, TS);
+    expect(out).toEqual([
+      { kind: "thinking", text: "let me reconsider", ts: TS },
+    ]);
+  });
+
+  test("empty thinking block is skipped", () => {
+    const p = new StreamParser();
+    const out = p.consume({
+      type: "assistant",
+      message: {
+        content: [{ type: "thinking", thinking: "   " }],
+      },
+    }, TS);
+    expect(out).toEqual([]);
+  });
+
   test("assistant tool_use block → tool_use turn event", () => {
     const p = new StreamParser();
     const out = p.consume({
