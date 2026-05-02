@@ -117,7 +117,12 @@ export async function runDesignSession(
 
     const opts = buildSdkOptions({
       cwd, config, mcpServer, approverHook: approver,
-      resume: resumeSession, abortController: input.abortController,
+      resume: resumeSession,
+      // Always thread the shutdown's underlying controller (rather
+      // than `input.abortController` directly) so `forceAbort()`
+      // reaches the SDK even when the caller didn't pass an explicit
+      // controller alongside the shutdown signal.
+      abortController: shutdown.abortController,
     });
 
     let lastSessionId: SessionId | null = null;

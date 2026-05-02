@@ -5,6 +5,14 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Fixed
+- **`forceAbort()` now reliably aborts the SDK in `runDesignSession`.**
+  The orchestrator was passing `input.abortController` to the SDK, so
+  if a caller supplied a `shutdown` signal but no separate
+  `abortController` (or two unrelated controllers), the second Ctrl+C
+  would trip the shutdown's internal AC but the SDK call would
+  continue to natural completion. `ShutdownSignal` now exposes its
+  underlying `abortController`, and the orchestrator threads that
+  through `buildSdkOptions` unconditionally.
 - **`ccloop design` Ctrl+C dead-window and missing SIGTERM.** Two
   related signal-handling bugs in the design CLI:
   - A second Ctrl+C arriving more than 2 s after the first silently

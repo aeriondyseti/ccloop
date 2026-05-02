@@ -22,6 +22,11 @@ export interface ShutdownSignal {
   whenRequested(): Promise<void>;
   /** AbortSignal that fires on the second Ctrl+C (hard kill). */
   readonly abortSignal: AbortSignal;
+  /** The underlying controller. Exposed so the orchestrator can pass
+   *  it to the SDK as `Options.abortController`, guaranteeing
+   *  `forceAbort()` actually reaches the in-flight query — even when
+   *  the caller didn't supply its own controller. */
+  readonly abortController: AbortController;
   /** Trip the graceful-shutdown flag. Idempotent. */
   requestGraceful(): void;
   /** Trip the hard-abort signal. Idempotent. */
@@ -46,6 +51,7 @@ export function createShutdownSignal(
   return {
     get requested() { return requested; },
     get abortSignal() { return ac.signal; },
+    get abortController() { return ac; },
     whenRequested: () => whenPromise,
     requestGraceful() {
       if (requested) return;
