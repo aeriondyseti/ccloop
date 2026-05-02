@@ -9,16 +9,22 @@ export interface InjectAuthResult {
   hasApiKey: boolean;
 }
 
+export interface InjectAuthDeps {
+  /** Test seam — defaults to the platform-specific OAuth token loader. */
+  load?: () => DiscoveredToken | null;
+}
+
 /** Discover an OAuth token via the platform-specific sources and
- *  populate `CLAUDE_CODE_OAUTH_TOKEN` so the SDK sees it. Token
- *  discovery already runs before this in production paths, but
- *  `process.env` may not yet reflect a keychain-discovered token —
- *  this helper closes that gap and reports what was found. */
-export function injectAuth(): InjectAuthResult {
+ *  populate `CLAUDE_CODE_OAUTH_TOKEN` so the SDK sees it. The SDK
+ *  reads the env var; this helper closes the gap when the token came
+ *  from the macOS keychain or `~/.claude/.credentials.json` rather
+ *  than the env directly. */
+export function injectAuth(deps: InjectAuthDeps = {}): InjectAuthResult {
+  const load = deps.load ?? loadOAuthToken;
   const hasApiKey = (process.env.ANTHROPIC_API_KEY ?? "") !== "";
   let discovered: DiscoveredToken | null = null;
   try {
-    discovered = loadOAuthToken();
+    discovered = load();
   } catch {
     discovered = null;
   }
