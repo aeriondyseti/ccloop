@@ -88,4 +88,11 @@ describe("state round-trip", () => {
     const tmpPath = `${path}.tmp.${process.pid}`;
     await expect(readFile(tmpPath, "utf8")).rejects.toThrow();
   });
+
+  test("validateState defaults rotation_summary to null on legacy state.json", () => {
+    const legacy = freshState() as unknown as Record<string, unknown>;
+    delete legacy.rotation_summary;
+    const out = validateState(legacy);
+    expect(out.rotation_summary).toBeNull();
+  });
 });

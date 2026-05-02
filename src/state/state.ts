@@ -183,6 +183,7 @@ export function validateState(raw: unknown): CcloopState {
   if (r.cache_low_streak === undefined) r.cache_low_streak = 0;
   if (r.steps_since_session_reset === undefined) r.steps_since_session_reset = 0;
   if (r.worktree === undefined) r.worktree = null;
+  if (r.rotation_summary === undefined) r.rotation_summary = null;
   return r as unknown as CcloopState;
 }
 

@@ -5,6 +5,14 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Fixed
+- **Forward-compat for legacy `state.json` after the rotation-summary
+  field landed.** `validateState` defaults all new optional fields to
+  null/0 on read of pre-feature state files; `rotation_summary` was
+  added without an entry, so existing `.ccloop/state.json` files
+  would deserialize with `rotation_summary: undefined`. The driver's
+  `?? ""` guard at the consumption site masked the immediate issue,
+  but the type contract says `string | null`. Added the default
+  alongside the others.
 - **Design-mode `MultiEdit` sandbox bypass.** `getTargetPath` only
   returned the first edit's `file_path`, so an agent could escape the
   `.ccloop/design/` write boundary by placing a permitted path first
