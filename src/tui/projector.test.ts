@@ -32,31 +32,42 @@ describe("project", () => {
     const v = project({
       state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
     });
-    expect(v.controlsHint).toMatch(/tab focus/);
     expect(v.controlsHint).toMatch(/scroll/);
   });
 
-  test("nowContent / focus / heartbeat pass through", () => {
+  test("transcript merges turn events and lifecycle entries chronologically", () => {
     const s = freshState();
     const v = project({
-      state: s, cwd: "/x", usage: null, recent: [], events: [],
+      state: s, cwd: "/x", usage: null, recent: [],
+      events: [
+        { ts: "2026-05-01T10:00:00Z", type: "step_start", step: 1, run_id: "r" },
+        { ts: "2026-05-01T10:00:05Z", type: "step_end", step: 1, run_id: "r",
+          outcome: "success", duration_ms: 5000, cost_usd: 0.01 },
+      ],
       now: new Date(),
-      nowContent: [{ kind: "assistant_text", text: "hi", ts: "" }],
-      focus: "log",
+      nowContent: [
+        { kind: "turn_start", turn: 1, ts: "2026-05-01T10:00:01Z" },
+        { kind: "assistant_text", text: "hi", ts: "2026-05-01T10:00:02Z" },
+      ],
+      focus: "transcript",
       heartbeat: "○",
     });
-    expect(v.nowContent.length).toBe(1);
-    expect(v.focus).toBe("log");
+    expect(v.transcript.length).toBe(4);
+    expect(v.transcript[0]?.source).toBe("lifecycle");
+    expect(v.transcript[1]?.source).toBe("turn");
+    expect(v.transcript[2]?.source).toBe("turn");
+    expect(v.transcript[3]?.source).toBe("lifecycle");
+    expect(v.focus).toBe("transcript");
     expect(v.heartbeat).toBe("○");
   });
 
-  test("nowContent / focus / heartbeat have sensible defaults", () => {
+  test("transcript / focus / heartbeat have sensible defaults", () => {
     const s = freshState();
     const v = project({
       state: s, cwd: "/x", usage: null, recent: [], events: [], now: new Date(),
     });
-    expect(v.nowContent).toEqual([]);
-    expect(v.focus).toBe("now");
+    expect(v.transcript).toEqual([]);
+    expect(v.focus).toBe("transcript");
     expect(v.heartbeat).toBe("●");
   });
 

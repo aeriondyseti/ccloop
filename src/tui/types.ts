@@ -9,8 +9,8 @@ export type TuiState =
   | "ESCALATED" | "GUARDRAIL_TRIP" | "DONE";
 
 /**
- * One entry in the live "now" pane. The pane is cleared at each step
- * boundary and re-populated as the SDK stream arrives.
+ * One entry in the live SDK turn stream. Emitted by the driver as the
+ * Agent SDK streams; merged into the unified transcript.
  */
 export type TurnEvent =
   | { kind: "turn_start"; turn: number; ts: string }
@@ -19,8 +19,29 @@ export type TurnEvent =
   | { kind: "tool_result"; tool: string; ok: boolean; excerpt: string; ts: string }
   | { kind: "idle"; ts: string; note: string };
 
-/** Which scrollable pane currently owns keyboard scroll input. */
-export type FocusTarget = "now" | "log";
+/** A durable lifecycle event from events.jsonl — promoted into a
+ *  transcript entry so the unified pane can render it as a typed
+ *  block instead of a pre-formatted string. The shape mirrors
+ *  `EventBase` from src/state/events.ts but kept structural here so
+ *  the TUI doesn't import state types. */
+export interface LifecycleEntry {
+  ts: string;
+  type: string;
+  step?: number;
+  [k: string]: unknown;
+}
+
+/** Single chronological surface that replaces the old log + now
+ *  panes. `lifecycle` carries durable events (step_start, escalate,
+ *  pause, etc.); `turn` carries live SDK turn events for the current
+ *  step. The renderer interleaves them in arrival order. */
+export type TranscriptEntry =
+  | { source: "lifecycle"; ts: string; entry: LifecycleEntry }
+  | { source: "turn"; ts: string; entry: TurnEvent };
+
+/** Single scroll target now that log and now are merged. Kept as a
+ *  union for forward-compat / test ergonomics. */
+export type FocusTarget = "transcript";
 
 export interface TuiViewModel {
   state: TuiState;
@@ -39,11 +60,11 @@ export interface TuiViewModel {
    *  flag — that's the same point at which the cache_warning event
    *  fires. 0 when healthy. */
   cacheLowStreak: number;
-  /** Live stream of the current step's turns. Cleared at step boundaries. */
-  nowContent: TurnEvent[];
-  /** Pre-formatted human-readable log lines. Capped at 500. */
-  logContent: string[];
-  /** Which scrollable pane has keyboard focus. */
+  /** Unified transcript: lifecycle events + live turn stream merged
+   *  in chronological order. Replaces the old log/now split. */
+  transcript: TranscriptEntry[];
+  /** Which scrollable pane has keyboard focus. Single target since
+   *  log and now were merged; retained for the focus-cycle hook. */
   focus: FocusTarget;
   /** Toggles each tick so users see the loop is alive. */
   heartbeat: "●" | "○";
@@ -79,9 +100,8 @@ export const EMPTY_VIEW: TuiViewModel = {
   rollingTokensOut: 0,
   averageCacheHitRate: 0,
   cacheLowStreak: 0,
-  nowContent: [],
-  logContent: [],
-  focus: "now",
+  transcript: [],
+  focus: "transcript",
   heartbeat: "●",
   interrupting: false,
   cadenceWait: null,

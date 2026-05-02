@@ -274,9 +274,12 @@ export async function runRun(argv: string[]): Promise<number> {
       : Promise.resolve<import("../loop/stepRecord.ts").StepRecord[]>([]),
     readChecklist(join(cwd, SPEC_FILENAME)),
   ]);
-  let logBuffer: string[] = priorEvents
-    .map((e) => eventToLine(e as { ts: string; type: string } & Record<string, unknown>))
-    .filter((s) => s.length > 0);
+  // Structured event buffer feeds the unified Transcript pane. The
+  // projector promotes each entry to a typed visual block; the
+  // non-TTY echo path below stringifies via eventToLine for log files.
+  let logBuffer: import("../tui/types.ts").LifecycleEntry[] = priorEvents
+    .map((e) => e as import("../tui/types.ts").LifecycleEntry)
+    .filter((e) => eventToLine(e as { ts: string; type: string } & Record<string, unknown>).length > 0);
 
   // Wake-up recap: when resuming, print a one-screen overnight summary
   // to stderr before the alt-screen takes over. Lands in scrollback once
@@ -333,7 +336,7 @@ export async function runRun(argv: string[]): Promise<number> {
     }
     const line = eventToLine(e);
     if (line) {
-      logBuffer = [...logBuffer, line].slice(-LOG_CAP);
+      logBuffer = [...logBuffer, e as unknown as import("../tui/types.ts").LifecycleEntry].slice(-LOG_CAP);
       if (!stdoutIsTty) process.stderr.write(line + "\n");
     }
     if (e.type === "step_end") { stepsDirty = true; checklistDirty = true; }
@@ -435,7 +438,7 @@ export async function runRun(argv: string[]): Promise<number> {
         : -1;
       const sig = [
         view.state, view.step, view.heartbeat,
-        view.nowContent.length, view.logContent.length,
+        view.transcript.length,
         Math.floor(view.elapsedMs / 1000),
         cadenceS,
         view.usage?.five_hour.utilization ?? "",
@@ -795,12 +798,12 @@ function buildView(
   state: CcloopState,
   cwd: string,
   usage: UsageClient | null,
-  events: string[],
+  events: import("../tui/types.ts").LifecycleEntry[],
   nowContent: import("../tui/types.ts").TurnEvent[],
   heartbeat: "●" | "○",
   recent: import("../loop/stepRecord.ts").StepRecord[],
   finalCommitSha: string,
-  focus: import("../tui/types.ts").FocusTarget = "now",
+  focus: import("../tui/types.ts").FocusTarget = "transcript",
   interrupting = false,
   cadenceWait: { startedAt: string; totalMs: number } | null = null,
   checklist: { done: number; total: number } | null = null,

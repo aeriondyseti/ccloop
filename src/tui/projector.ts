@@ -6,15 +6,24 @@
 import type { CcloopState } from "../state/state.ts";
 import type { UsageSnapshot } from "../usage/client.ts";
 import type { StepRecord } from "../loop/stepRecord.ts";
-import type { FocusTarget, TuiState, TuiViewModel, TurnEvent } from "./types.ts";
+import type {
+  FocusTarget,
+  LifecycleEntry,
+  TranscriptEntry,
+  TuiState,
+  TuiViewModel,
+  TurnEvent,
+} from "./types.ts";
 
 export interface ProjectorInput {
   state: CcloopState;
   cwd: string;
   usage: UsageSnapshot | null;
   recent: StepRecord[];
-  /** Pre-formatted log lines, oldest → newest. Caller caps the length. */
-  events: string[];
+  /** Durable lifecycle events, oldest → newest. Caller caps the
+   *  length. The projector promotes these into the transcript so the
+   *  renderer can pick a typed block per event kind. */
+  events: LifecycleEntry[];
   /** Live current-step stream. Caller resets at step boundaries. */
   nowContent?: TurnEvent[];
   /** Which scrollable pane currently has focus. */
@@ -35,16 +44,16 @@ export interface ProjectorInput {
   operatorPaused?: boolean;
 }
 
-const RUN_CONTROLS = "tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · ctrl-c stop";
+const RUN_CONTROLS = "↑↓ scroll · ⇞⇟ page · g/G top/bot · ctrl-c stop";
 
 const CONTROLS: Record<TuiState, string> = {
   STARTING: "ctrl-c quit",
   RUNNING: `p pause · ${RUN_CONTROLS}`,
   PAUSED: RUN_CONTROLS,
-  OPERATOR_PAUSED: "p resume · tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · ctrl-c stop",
+  OPERATOR_PAUSED: `p resume · ${RUN_CONTROLS}`,
   ESCALATED: "c continue · r revert · e edit spec · q quit",
   GUARDRAIL_TRIP: "q quit · e edit ccloop.toml",
-  DONE: "tab focus · ↑↓ scroll · ⇞⇟ page · g/G top/bot · q quit",
+  DONE: "↑↓ scroll · ⇞⇟ page · g/G top/bot · q quit",
 };
 
 export function project(input: ProjectorInput): TuiViewModel {
@@ -97,9 +106,8 @@ export function project(input: ProjectorInput): TuiViewModel {
     rollingTokensOut: tokensOut,
     averageCacheHitRate: avgCache,
     cacheLowStreak: input.state.cache_low_streak,
-    nowContent: input.nowContent ?? [],
-    logContent: input.events,
-    focus: input.focus ?? "now",
+    transcript: mergeTranscript(input.events, input.nowContent ?? []),
+    focus: input.focus ?? "transcript",
     heartbeat: input.heartbeat ?? "●",
     interrupting: input.interrupting ?? false,
     cadenceWait: input.cadenceWait ?? null,
@@ -125,6 +133,42 @@ export function project(input: ProjectorInput): TuiViewModel {
     checklist:
       input.checklist && input.checklist.total > 0 ? input.checklist : null,
   };
+}
+
+/** Merge lifecycle and turn events into a single chronological list.
+ *  Lifecycle entries are durable (events.jsonl); turn entries are live
+ *  for the current step. We rely on caller-provided ordering within
+ *  each list and stable-merge by ts so a step_start that arrives at
+ *  the same instant as the first stream chunk lands first. */
+function mergeTranscript(
+  events: LifecycleEntry[],
+  turns: TurnEvent[],
+): TranscriptEntry[] {
+  const out: TranscriptEntry[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < events.length && j < turns.length) {
+    const a = events[i];
+    const b = turns[j];
+    if (!a) { out.push({ source: "turn", ts: b!.ts, entry: b! }); j++; continue; }
+    if (!b) { out.push({ source: "lifecycle", ts: a.ts, entry: a }); i++; continue; }
+    if (a.ts <= b.ts) {
+      out.push({ source: "lifecycle", ts: a.ts, entry: a });
+      i++;
+    } else {
+      out.push({ source: "turn", ts: b.ts, entry: b });
+      j++;
+    }
+  }
+  for (; i < events.length; i++) {
+    const a = events[i]!;
+    out.push({ source: "lifecycle", ts: a.ts, entry: a });
+  }
+  for (; j < turns.length; j++) {
+    const b = turns[j]!;
+    out.push({ source: "turn", ts: b.ts, entry: b });
+  }
+  return out;
 }
 
 function stateToTui(s: CcloopState["state"]): TuiState {
