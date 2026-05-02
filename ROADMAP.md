@@ -136,3 +136,20 @@ deliberately scoped out of the initial build.
 - **Show Code Diffs in the build loop TUI.** Split the screen in the
   build loop TUI so that the right side is dedicated to showing diffs
   of the code as it is being edited.
+
+- **Phase tracking in `ccloop design`.** The orchestrator currently
+  does not emit `design_phase_enter` events because it has no
+  visibility into which phase the agent is in. The agent is told
+  about phases via the system prompt; if we want a phase indicator
+  in the TUI we need either (a) a structured "phase" field the
+  agent populates via `ask_user` / a side channel, or (b) heuristic
+  detection from the draft's section headings. Bring back the
+  `design_phase_enter` event type and emitter when one lands.
+
+- **Conversation-history resume in `ccloop design`.** Today the
+  resume model is "load the draft on disk; conversation is fresh."
+  Fine for short sessions, less so for long ones. If we want true
+  conversation resume, store the SDK `session_id` (and maybe a
+  recent-turn ring buffer) in `.ccloop/design/session.json` and
+  pass it as `resume` on next launch — same shape as the build
+  loop's session resume.

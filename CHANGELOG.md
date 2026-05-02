@@ -5,6 +5,13 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Removed
+- **`.claude/SPEC.md` §15 design-loop pointer section.** The internal
+  build contract spec rules say "don't edit `.claude/SPEC.md` unless
+  the feature genuinely changes the contract." The §15 I added during
+  the autonomous loop was a code map / pointer doc that violates the
+  rule — its content reads as living documentation, not a contract
+  change. The forward-looking notes (phase tracking, history resume)
+  moved to `ROADMAP.md` where they belong.
 - **Never-fired `design_phase_enter` event.** The emitter exposed
   `phaseEnter()` and the `EventType` union listed
   `design_phase_enter`, but the orchestrator doesn't track phase
