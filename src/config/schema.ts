@@ -129,7 +129,7 @@ export const DEFAULTS: CcloopConfig = {
   },
   claude: {
     yolo_mode: false,
-    max_turns_per_step: 50,
+    max_turns_per_step: 20,
     max_continuations_per_step: 5,
     effort: "xhigh",
     max_steps_per_session: 30,
