@@ -1,11 +1,16 @@
 # ccloop
 
-Drives Claude Code in a loop against a project's `SPEC.md` until the
-project is done.
+A two-phase tool for driving Claude Code through a software project:
 
-ccloop watches `./DONE.md` as its terminal signal: Claude creates that
-file when every Verification Requirement in the spec is satisfied, and
-ccloop exits clean.
+1. **`ccloop design`** — interactive brainstorming agent that walks
+   you from a vague idea (or an existing codebase) to a validated
+   `SPEC.md`.
+2. **`ccloop build`** — drives Claude Code in a loop against that
+   `SPEC.md` until every Verification Requirement is satisfied and
+   `./DONE.md` lands.
+
+Bare `ccloop` auto-routes: if `./SPEC.md` exists and validates, it
+runs the build loop; otherwise it runs the design loop.
 
 ## Install
 
@@ -17,24 +22,54 @@ Requires Bun ≥ 1.1, `git`, and either `bwrap` (Linux) or
 `sandbox-exec` (macOS, builtin) when running with the default
 sandboxed permissions.
 
-## Quickstart
+## Quickstart — design then build
 
 ```
 mkdir my-project && cd my-project
-ccloop init                # scaffolds SPEC.md and ccloop.toml
-$EDITOR SPEC.md            # describe the project + Verification Requirements
 export CLAUDE_CODE_OAUTH_TOKEN=...   # via `claude setup-token`
-ccloop run                 # foreground loop with TUI dashboard
+ccloop design                        # two-pane TUI: chat + live draft
+# … walk through vision → users → scope → architecture →
+# … milestones → acceptance, then type /accept when ready.
+# This writes ./SPEC.md.
+ccloop build                         # drive the build loop
 ```
 
-Press `Ctrl-C` to stop. `ccloop run --continue` resumes from
+Or, if you already know what you're building:
+
+```
+ccloop init                # scaffolds SPEC.md + ccloop.toml
+$EDITOR SPEC.md            # fill in the spec + Verification Requirements
+ccloop build               # foreground loop with TUI dashboard
+```
+
+`ccloop build` is an alias for the original `ccloop run`. Press
+`Ctrl-C` to stop. `ccloop build --continue` resumes from
 `./.ccloop/state.json` after a kill or reboot.
+
+`ccloop design` keyboard:
+
+- **Tab / Shift-Tab** — switch focus between the transcript and the
+  live draft pane.
+- **Enter** — submit your typed input or selection.
+- **Type freely** — between agent turns, your text becomes the next
+  prompt.
+- **`/accept`** — validate the draft, confirm, promote to
+  `./SPEC.md`, and offer to launch `ccloop build`.
+- **`/abort`** — exit without promoting.
+- **Ctrl-C once** — graceful shutdown: the agent writes a session
+  summary to `./.ccloop/design/last-session.md` so you can resume
+  later. Ctrl-C twice within 2s force-quits.
+
+Re-running `ccloop design` after Ctrl-C reuses the existing
+`./.ccloop/design/spec.draft.md` as a starting point. The
+conversation history isn't restored — each invocation is a fresh
+agent session — but the draft on disk is the source of truth.
 
 Once `DONE.md` exists at the project root, ccloop exits with status
 0; the `./.ccloop/` directory is safe to delete after a successful
 run.
 
-## How it works
+## How the build loop works
 
 - Each ccloop **step** is one Anthropic Agent SDK `query` call.
   ccloop renders a prompt with the spec, the cross-step
@@ -48,6 +83,26 @@ run.
   five-hour-cap exhaustion and escalate on weekly-cap exhaustion.
 - After N consecutive step failures (3 by default), ccloop escalates
   and notifies via push / webhook if configured.
+
+## How the design loop works
+
+- One in-process Anthropic Agent SDK session opened with a
+  design-specific system prompt (vision → users → scope →
+  architecture → milestones → acceptance) plus the current draft as
+  context.
+- A built-in MCP tool, `ask_user`, suspends the agent and renders an
+  interactive multiple-choice widget in the TUI; users can press
+  Esc to provide freeform input instead.
+- Tool sandboxing is reused from the build loop:
+  `Read` / `Grep` / `Glob` / `WebSearch` / `WebFetch` are
+  unrestricted; `Edit` / `Write` are scoped to `./.ccloop/design/`
+  only; `Bash` runs through the same `bwrap` / `sandbox-exec` wrap.
+- Lifecycle events are appended to the same `./.ccloop/events.jsonl`
+  the build loop writes to, so a single tail covers both phases.
+
+Sibling artifacts the design agent may produce — `ROADMAP.md`,
+`IDEAS.md`, `TECH-DEBT.md` — are promoted alongside `SPEC.md` on
+`/accept` if they exist.
 
 See `ccloop.toml` for tuning knobs.
 

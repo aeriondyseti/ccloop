@@ -109,7 +109,7 @@ Pinned terms used by this spec:
       integration test: render two-pane layout, focus cycling,
       `ask_user` widget keyboard handling. Coverage target same as
       build loop.
-- [ ] **Documentation.** Update `README.md` with the two-phase model
+- [x] **Documentation.** Update `README.md` with the two-phase model
       and a `ccloop design` quickstart. Update `.claude/CLAUDE.md` to
       reflect that `./SPEC.md` may now exist at the repo root (the
       "no SPEC.md at root" assertion is no longer load-bearing post
