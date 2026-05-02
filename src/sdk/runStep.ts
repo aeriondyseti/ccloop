@@ -7,7 +7,20 @@ import {
   type SDKResultMessage,
   type NonNullableUsage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { openSdkDebugSink } from "./debugDump.ts";
+import type { SdkDebugSink } from "./debugDump.ts";
+
+// SDK debug dump module is loaded lazily so it can be excluded from
+// the published npm tarball without breaking production runs (where
+// CCLOOP_SDK_DEBUG is never set).
+const SDK_DEBUG_ENV = "CCLOOP_SDK_DEBUG";
+async function maybeOpenSdkDebugSink(
+  cwd: string,
+  step: number | undefined,
+): Promise<SdkDebugSink | null> {
+  if (process.env[SDK_DEBUG_ENV] !== "1") return null;
+  const { openSdkDebugSink } = await import("./debugDump.ts");
+  return openSdkDebugSink(cwd, step);
+}
 
 type QueryImpl = typeof defaultQuery;
 
@@ -70,7 +83,7 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
   let prompt = input.prompt;
   let resume = input.resumeSessionId;
   let continuations = 0;
-  const debugSink = openSdkDebugSink(input.cwd, input.step);
+  const debugSink = await maybeOpenSdkDebugSink(input.cwd, input.step);
 
   // Outer loop = one SDK `query` call. We keep going while the SDK
   // returns `pause_turn` (it wants to continue past its own maxTurns

@@ -1,8 +1,11 @@
 import { runInit } from "./init.ts";
 import { runRun } from "./run.ts";
 import { HELP_TEXT } from "./help.ts";
-import { runDebugCommand } from "./debug.ts";
 import { IS_DEV_BUILD, VERSION } from "../build-info.ts";
+
+// `runDebugCommand` is loaded lazily so dev-only sources can be
+// excluded from the published npm tarball without breaking
+// production binaries that never reach the `debug:*` branch.
 
 export { VERSION };
 
@@ -62,6 +65,7 @@ export async function run(argv: string[]): Promise<number> {
       );
       return 1;
     }
+    const { runDebugCommand } = await import("./debug.ts");
     return await runDebugCommand(first.slice("debug:".length), rest);
   }
 
