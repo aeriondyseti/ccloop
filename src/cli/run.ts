@@ -10,7 +10,9 @@ import { confirmDefaultYes } from "./prompt.ts";
 import { runInit } from "./init.ts";
 import { CCLOOP_DIR, CONFIG_FILENAME, SPEC_FILENAME, runtimePaths } from "../state/paths.ts";
 import {
-  autoCommit, initRepoEmpty, isGitRepo, isWorkingTreeClean,
+  addWorktree, autoCommit, currentBranch, deleteBranch, hardReset, headSha,
+  initRepoEmpty, isGitRepo, isWorkingTreeClean,
+  removeWorktree, tryFastForward,
 } from "../loop/git.ts";
 import { acquireLock, LockHeldError } from "../state/lock.ts";
 import { LoopDriver } from "../loop/driver.ts";
@@ -31,8 +33,8 @@ import { parseChecklist } from "../spec/checklist.ts";
 import { readFile } from "node:fs/promises";
 import { VERSION } from "../build-info.ts";
 import { clearSessionForReorientation, decideEscalationKey, resetForContinue } from "../loop/escalation.ts";
-import { hardReset } from "../loop/git.ts";
-import { writeState } from "../state/state.ts";
+import { freshState, readState, writeState } from "../state/state.ts";
+import { rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 
 const TUI_TICK_MS = 100;
@@ -142,12 +144,7 @@ export async function runRun(argv: string[]): Promise<number> {
       return 1;
     }
   }
-  // §10.4 recovery commit: --continue with a dirty tree means the
-  // previous instance was killed mid-step. Auto-commit whatever's
-  // there before resuming so the loop has a clean baseline. Step
-  // number is filled in once state is loaded (see below).
   const isResume = decision.kind === "resume_after_confirm" || decision.kind === "resume_no_prompt";
-  const needsRecoveryCommit = isResume && !(await isWorkingTreeClean(cwd));
 
   // 5. Set caching env opt-in per §6.6.
   process.env.ENABLE_PROMPT_CACHING_1H = process.env.ENABLE_PROMPT_CACHING_1H ?? "1";
@@ -166,10 +163,67 @@ export async function runRun(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // 7. Build driver, bus, optional usage client.
+  // 7. Load (or freshly mint) state, then set up the worktree before
+  // anything else takes a `cwd`. The driver, all SDK calls, and every
+  // git operation that touches the working tree run against
+  // `effectiveCwd` — for a worktree-mode run that's
+  // `<cwd>/.ccloop/worktree`. State, events, lock, and the lifecycle
+  // log all stay in the host repo's `.ccloop/`.
+  let state: CcloopState = (await readState(paths.state)) ?? freshState(new Date());
+  let effectiveCwd = cwd;
+  if (state.worktree) {
+    // Recover the run's worktree regardless of the current config
+    // value — once a run is started in worktree mode, every resume
+    // must keep operating in that worktree or the loop's commits
+    // would land on the wrong branch.
+    if (!existsSync(state.worktree.path)) {
+      process.stderr.write(
+        `ccloop: worktree at ${state.worktree.path} is missing; cannot resume.\n` +
+        `       Recreate it with \`git worktree add ${state.worktree.path} ${state.worktree.branch}\`, ` +
+        `or remove .ccloop/state.json's \`worktree\` field to fall back to host CWD.\n`,
+      );
+      if (release) await release();
+      return 1;
+    }
+    effectiveCwd = state.worktree.path;
+  } else if (config.loop.use_worktree && !isResume) {
+    // Fresh worktree creation. The host CWD has just been verified
+    // clean (above), so the worktree we branch off HEAD inherits a
+    // clean tree.
+    try {
+      const baseSha = await headSha(cwd);
+      const branch = await currentBranch(cwd);
+      const branchName = `ccloop/${state.run_id}`;
+      await addWorktree(cwd, paths.worktree, branchName, baseSha);
+      state.worktree = {
+        path: paths.worktree,
+        branch: branchName,
+        original_branch: branch ?? "",
+        original_base_sha: baseSha,
+      };
+      effectiveCwd = paths.worktree;
+      process.stderr.write(
+        `ccloop: working in worktree ${paths.worktree} on branch ${branchName}\n`,
+      );
+    } catch (err) {
+      process.stderr.write(`ccloop: worktree setup failed: ${(err as Error).message}\n`);
+      if (release) await release();
+      return 1;
+    }
+  }
+
+  // §10.4 recovery commit: --continue with a dirty tree means the
+  // previous instance was killed mid-step. Auto-commit whatever's
+  // there before resuming so the loop has a clean baseline. The
+  // "tree" we care about is the one driver/SDK actually operate on —
+  // the worktree when use_worktree is on, the host CWD otherwise.
+  const needsRecoveryCommit = isResume && !(await isWorkingTreeClean(effectiveCwd));
+
+  // Persist whatever fresh-state / worktree-setup did, so the driver
+  // and any concurrent state reader see a consistent file.
+  await writeState(paths.state, state);
   const bus = new EventBus<import("../loop/driver.ts").DriverEvent>();
-  const driver = new LoopDriver(cwd, paths, config, bus);
-  const state = await driver.loadOrInitState();
+  const driver = new LoopDriver(effectiveCwd, paths, config, bus);
 
   // §11.5 instance_start. Persist as soon as state is loaded so
   // events.jsonl carries one entry per process lifetime — lets
@@ -178,14 +232,14 @@ export async function runRun(argv: string[]): Promise<number> {
   const lifecycleEvents = new EventLogger(paths.events);
   let instanceStartEmitted = false;
   try {
-    const headSha = await import("../loop/git.ts").then((m) => m.headSha(cwd));
+    const sha = await headSha(effectiveCwd);
     await lifecycleEvents.append({
       run_id: state.run_id,
       step: state.current_step,
       type: "instance_start",
       ccloop_version: VERSION,
-      cwd,
-      git_sha: String(headSha),
+      cwd: effectiveCwd,
+      git_sha: String(sha),
     });
     instanceStartEmitted = true;
   } catch {
@@ -195,7 +249,7 @@ export async function runRun(argv: string[]): Promise<number> {
   if (needsRecoveryCommit) {
     try {
       const r = await autoCommit(
-        cwd,
+        effectiveCwd,
         `chore(ccloop): recovery commit before resume of step ${state.current_step}`,
       );
       if (r.committed) {
@@ -272,7 +326,7 @@ export async function runRun(argv: string[]): Promise<number> {
     isResume
       ? loadRecentSteps(paths.steps, RECENT_STEPS_CAP)
       : Promise.resolve<import("../loop/stepRecord.ts").StepRecord[]>([]),
-    readChecklist(join(cwd, SPEC_FILENAME)),
+    readChecklist(join(effectiveCwd, SPEC_FILENAME)),
   ]);
   // Structured event buffer feeds the unified Transcript pane. The
   // projector promotes each entry to a typed visual block; the
@@ -485,7 +539,7 @@ export async function runRun(argv: string[]): Promise<number> {
           stepsDirty = false;
         }
         if (checklistDirty) {
-          cachedChecklist = await readChecklist(join(cwd, SPEC_FILENAME));
+          cachedChecklist = await readChecklist(join(effectiveCwd, SPEC_FILENAME));
           checklistDirty = false;
         }
         const now = Date.now();
@@ -541,7 +595,13 @@ export async function runRun(argv: string[]): Promise<number> {
         heartbeatUrl: config.notify.heartbeat_url,
         pauseGate,
       });
-      if (outcome.kind === "done") { exitCode = 0; resolved = true; }
+      if (outcome.kind === "done") {
+        exitCode = 0;
+        resolved = true;
+        if (state.worktree) {
+          await finalizeWorktreeOnDone(state, cwd, lifecycleEvents);
+        }
+      }
       else if (outcome.kind === "guardrail_trip") {
         await handleGuardrailTrip(cwd, aborter.signal, readMenuKey);
         exitCode = 4;
@@ -552,7 +612,7 @@ export async function runRun(argv: string[]): Promise<number> {
         resolved = true;
       }
       else if (outcome.kind === "escalated") {
-        const action = await handleEscalation(state, paths, cwd, aborter.signal, readMenuKey);
+        const action = await handleEscalation(state, paths, effectiveCwd, aborter.signal, readMenuKey);
         // Audit trail: record what the operator did at the menu so a
         // post-mortem (or the wake-up recap) can answer "what
         // recovery action did I take at 2am?" without inferring from
@@ -634,6 +694,84 @@ async function readChecklist(specPath: string): Promise<{ done: number; total: n
   }
 }
 
+/** Reattach the worktree's commits onto the user's branch, fast-forward
+ *  only. On success the worktree is removed and the run-local branch
+ *  deleted; the user is left with a clean repo on their original branch
+ *  with the loop's commits at HEAD. On failure (branch moved, FF not
+ *  possible, detached HEAD at start, etc.) the worktree is preserved so
+ *  the user can merge manually. */
+type WorktreeFinalizedOutcome = "merged" | "ff_failed" | "skipped";
+
+async function finalizeWorktreeOnDone(
+  state: CcloopState,
+  hostCwd: string,
+  events: EventLogger,
+): Promise<void> {
+  const wt = state.worktree;
+  if (!wt) return;
+  const tipSha = await headSha(wt.path);
+  const target = wt.original_branch;
+  const shortTip = String(tipSha).slice(0, 7);
+
+  const emit = (
+    outcome: WorktreeFinalizedOutcome,
+    reason: string,
+  ): Promise<void> =>
+    appendBest(events, {
+      run_id: state.run_id, step: state.current_step,
+      type: "worktree_finalized", outcome, reason,
+      branch: wt.branch, target_branch: target, tip_sha: String(tipSha),
+    });
+
+  if (!target) {
+    process.stderr.write(
+      `ccloop: started in detached HEAD; loop commits live on branch ${wt.branch} ` +
+      `at ${shortTip}. Worktree retained at ${wt.path}.\n`,
+    );
+    await emit("skipped", "detached HEAD at run start");
+    return;
+  }
+
+  const ff = await tryFastForward(hostCwd, target, tipSha, wt.original_base_sha);
+  if (!ff.ok) {
+    process.stderr.write(
+      `ccloop: cannot fast-forward ${target}: ${ff.reason}.\n` +
+      `        Worktree retained at ${wt.path}; merge manually with ` +
+      `\`git merge ${wt.branch}\` from ${target}.\n`,
+    );
+    await emit("ff_failed", ff.reason);
+    return;
+  }
+
+  let cleanupNote = "";
+  try {
+    await removeWorktree(hostCwd, wt.path);
+  } catch (err) {
+    cleanupNote = ` (worktree-remove warning: ${(err as Error).message})`;
+  }
+  try {
+    await deleteBranch(hostCwd, wt.branch);
+  } catch (err) {
+    cleanupNote += ` (branch-delete warning: ${(err as Error).message})`;
+  }
+  // Some git versions leave the worktree dir behind after a forced
+  // remove if files were created outside git's awareness; rm it so a
+  // subsequent fresh run can recreate it without tripping.
+  try { await rm(wt.path, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  process.stderr.write(
+    `ccloop: fast-forwarded ${target} to ${shortTip}.${cleanupNote}\n`,
+  );
+  await emit("merged", "");
+}
+
+async function appendBest(
+  events: EventLogger,
+  payload: Parameters<EventLogger["append"]>[0],
+): Promise<void> {
+  try { await events.append(payload); } catch { /* best-effort */ }
+}
+
 async function isCwdGreenfield(cwd: string): Promise<boolean> {
   // Empty, or only SPEC.md / ccloop.toml / .ccloop/ present.
   const allowed = new Set([SPEC_FILENAME, CONFIG_FILENAME, CCLOOP_DIR]);
@@ -712,6 +850,18 @@ function eventToLine(e: { ts: string; type: string } & Record<string, unknown>):
     }
     case "escalation_resolved":
       return `${t}  escalation resolved · ${String(e.action ?? "?")}`;
+    case "worktree_finalized": {
+      const outcome = String(e.outcome ?? "?");
+      const target = String(e.target_branch ?? "");
+      const tip = String(e.tip_sha ?? "").slice(0, 7);
+      if (outcome === "merged") {
+        return `${t}  worktree merged → ${target}${tip ? ` @ ${tip}` : ""}`;
+      }
+      if (outcome === "ff_failed") {
+        return `${t}  worktree retained · cannot fast-forward ${target}: ${String(e.reason ?? "")}`;
+      }
+      return `${t}  worktree retained · ${String(e.reason ?? outcome)}`;
+    }
     case "session_rotated": {
       const prev = String(e.previous_session_id ?? "");
       const prevTail = prev ? ` (was ${prev.slice(0, 8)})` : "";

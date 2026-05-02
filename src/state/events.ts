@@ -21,6 +21,7 @@ export type EventType =
   | "cache_warning"
   | "recovery_commit"
   | "session_rotated"
+  | "worktree_finalized"
   | "done"
   /** Bus-only: live SDK stream events for the TUI. Not written to
    *  events.jsonl (would bloat the durable log). */

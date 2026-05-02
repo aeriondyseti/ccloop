@@ -26,6 +26,13 @@ export interface LoopConfig {
   /** Per-invocation timeout for `gate_command`. A hung typecheck or
    *  test runner must not be able to stall the orchestrator overnight. */
   gate_timeout_seconds: number;
+  /** Run each step inside a git worktree at `.ccloop/worktree/`,
+   *  branched from HEAD onto `ccloop/<run_id>`. Isolates ccloop's
+   *  commits from the user's working branch until the run finishes,
+   *  then fast-forwards the user's branch onto the worktree's tip on
+   *  success. Disable to commit straight onto the current branch
+   *  (legacy behavior). */
+  use_worktree: boolean;
 }
 
 export interface ClaudeConfig {
@@ -106,6 +113,7 @@ export const DEFAULTS: CcloopConfig = {
     rate_limit_default_pause_seconds: 3600,
     gate_command: "",
     gate_timeout_seconds: 300,
+    use_worktree: true,
   },
   claude: {
     yolo_mode: false,

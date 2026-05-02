@@ -190,3 +190,88 @@ export async function hardReset(cwd: string, sha: Sha): Promise<void> {
     throw new Error(`git reset --hard ${sha} failed: ${r.stderr.trim()}`);
   }
 }
+
+/** Current branch name in `cwd`. Returns null on detached HEAD. */
+export async function currentBranch(cwd: string): Promise<string | null> {
+  const r = await runGit(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd);
+  if (r.exitCode !== 0) return null;
+  const name = r.stdout.trim();
+  return name || null;
+}
+
+/** SHA pointed to by a local branch ref, or null if it doesn't exist. */
+export async function branchSha(cwd: string, branch: string): Promise<Sha | null> {
+  const r = await runGit(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], cwd);
+  if (r.exitCode !== 0) return null;
+  const v = r.stdout.trim();
+  return v ? asSha(v) : null;
+}
+
+/** Create a worktree at `wtPath` on a new branch `branch` based off `baseRef`. */
+export async function addWorktree(
+  repoDir: string,
+  wtPath: string,
+  branch: string,
+  baseRef: string,
+): Promise<void> {
+  const r = await runGit(["worktree", "add", "-b", branch, wtPath, baseRef], repoDir);
+  if (r.exitCode !== 0) {
+    throw new Error(`git worktree add failed: ${r.stderr.trim()}`);
+  }
+}
+
+/** Remove a linked worktree. `--force` so an unclean tree is acceptable;
+ *  ccloop is the only writer in production runs. */
+export async function removeWorktree(repoDir: string, wtPath: string): Promise<void> {
+  const r = await runGit(["worktree", "remove", "--force", wtPath], repoDir);
+  if (r.exitCode !== 0) {
+    throw new Error(`git worktree remove failed: ${r.stderr.trim()}`);
+  }
+}
+
+/** Best-effort branch deletion. Used after a successful fast-forward
+ *  has reattached the worktree's commits to the user's branch. */
+export async function deleteBranch(repoDir: string, branch: string): Promise<void> {
+  const r = await runGit(["branch", "-D", branch], repoDir);
+  if (r.exitCode !== 0) {
+    throw new Error(`git branch -D failed: ${r.stderr.trim()}`);
+  }
+}
+
+export type FastForwardResult =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+/** Attempt to fast-forward `branch` in `repoDir` to `newSha`. Succeeds
+ *  only if `branch` still points at `expectedBaseSha` (i.e. nobody
+ *  moved it during the run); otherwise returns a reason without
+ *  mutating refs. If `branch` is the currently checked-out branch,
+ *  uses `git merge --ff-only` so the working tree stays consistent;
+ *  otherwise updates the ref directly. */
+export async function tryFastForward(
+  repoDir: string,
+  branch: string,
+  newSha: Sha,
+  expectedBaseSha: Sha,
+): Promise<FastForwardResult> {
+  const cur = await branchSha(repoDir, branch);
+  if (!cur) return { ok: false, reason: `branch \`${branch}\` not found` };
+  if (cur !== expectedBaseSha) {
+    return {
+      ok: false,
+      reason: `branch \`${branch}\` moved from ${expectedBaseSha.slice(0, 7)} to ${cur.slice(0, 7)} during the run`,
+    };
+  }
+  const head = await currentBranch(repoDir);
+  if (head === branch) {
+    const r = await runGit(["merge", "--ff-only", String(newSha)], repoDir);
+    if (r.exitCode !== 0) return { ok: false, reason: r.stderr.trim() || "merge --ff-only failed" };
+    return { ok: true };
+  }
+  const r = await runGit(
+    ["update-ref", `refs/heads/${branch}`, String(newSha), String(expectedBaseSha)],
+    repoDir,
+  );
+  if (r.exitCode !== 0) return { ok: false, reason: r.stderr.trim() || "update-ref failed" };
+  return { ok: true };
+}

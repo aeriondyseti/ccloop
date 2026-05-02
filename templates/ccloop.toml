@@ -37,6 +37,16 @@ gate_command = ""
 # Per-invocation timeout for gate_command (seconds).
 gate_timeout_seconds = 300
 
+# Run each step inside a git worktree at .ccloop/worktree/, branched
+# from HEAD onto ccloop/<run_id>. The user's working branch is
+# untouched until the run finishes; on `done`, ccloop fast-forwards
+# the original branch onto the worktree's tip and removes the
+# worktree. If the original branch was moved during the run (so a
+# fast-forward isn't possible), the worktree is retained and the
+# user merges manually. Disable to commit straight onto the current
+# branch.
+use_worktree = true
+
 [claude]
 # false: permissionMode = "acceptEdits"; non-edit Bash routed through
 #        bwrap (Linux) / sandbox-exec (macOS) scoped to CWD; denylist

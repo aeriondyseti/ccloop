@@ -3,10 +3,16 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  addWorktree,
   autoCommit,
+  branchSha,
+  currentBranch,
+  deleteBranch,
   initRepoEmpty,
   isWorkingTreeClean,
+  removeWorktree,
   runGit,
+  tryFastForward,
   headSha,
   headDiffHash,
 } from "./git.ts";
@@ -88,6 +94,80 @@ describe("git helpers (real git)", () => {
   test("headSha returns 40-char sha", async () => {
     const s = await headSha(dir);
     expect(s).toMatch(/^[a-f0-9]{40}$/);
+  });
+});
+
+describe("worktree helpers", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ccloop-wt-"));
+    await runGit(["init", "--quiet", "-b", "main"], dir);
+    await runGit(["config", "user.email", "test@example.com"], dir);
+    await runGit(["config", "user.name", "ccloop test"], dir);
+    await runGit(["commit", "--allow-empty", "-m", "init"], dir);
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("currentBranch returns the branch name; null in detached HEAD", async () => {
+    expect(await currentBranch(dir)).toBe("main");
+    const sha = await headSha(dir);
+    await runGit(["checkout", "--detach", String(sha)], dir);
+    expect(await currentBranch(dir)).toBe(null);
+  });
+
+  test("addWorktree creates a linked worktree on a new branch", async () => {
+    const wt = join(dir, ".ccloop", "worktree");
+    await addWorktree(dir, wt, "ccloop/run-x", "HEAD");
+    expect(await currentBranch(wt)).toBe("ccloop/run-x");
+    expect(await headSha(wt)).toBe(await headSha(dir));
+    // Branch is visible from the host.
+    expect(await branchSha(dir, "ccloop/run-x")).toBe(await headSha(dir));
+  });
+
+  test("tryFastForward succeeds when target is unchanged", async () => {
+    const wt = join(dir, ".ccloop", "worktree");
+    const baseSha = await headSha(dir);
+    await addWorktree(dir, wt, "ccloop/run-x", "HEAD");
+    // Make a commit in the worktree.
+    await writeFile(join(wt, "a.txt"), "hi");
+    const c = await autoCommit(wt, "feat: a");
+    expect(c.committed).toBe(true);
+
+    const r = await tryFastForward(dir, "main", c.sha, baseSha);
+    expect(r.ok).toBe(true);
+    // main now points at the worktree's tip.
+    expect(await branchSha(dir, "main")).toBe(c.sha);
+  });
+
+  test("tryFastForward refuses when target moved", async () => {
+    const wt = join(dir, ".ccloop", "worktree");
+    const baseSha = await headSha(dir);
+    await addWorktree(dir, wt, "ccloop/run-x", "HEAD");
+    await writeFile(join(wt, "a.txt"), "hi");
+    const c = await autoCommit(wt, "feat: a");
+
+    // Host moves main forward independently.
+    await writeFile(join(dir, "host.txt"), "yo");
+    await autoCommit(dir, "host commit");
+
+    const r = await tryFastForward(dir, "main", c.sha, baseSha);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/moved/);
+    // main is unchanged at the host's new tip — we did not touch it.
+    expect(await branchSha(dir, "main")).not.toBe(c.sha);
+  });
+
+  test("removeWorktree + deleteBranch tear the worktree down cleanly", async () => {
+    const wt = join(dir, ".ccloop", "worktree");
+    await addWorktree(dir, wt, "ccloop/run-x", "HEAD");
+    await writeFile(join(wt, "a.txt"), "hi");
+    await autoCommit(wt, "feat: a");
+    await removeWorktree(dir, wt);
+    await deleteBranch(dir, "ccloop/run-x");
+    expect(await branchSha(dir, "ccloop/run-x")).toBe(null);
   });
 });
 

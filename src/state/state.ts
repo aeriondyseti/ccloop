@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { atomicWriteFile } from "../util/atomic.ts";
 import {
-  type IsoTimestamp, type RunId, type SessionId,
+  type IsoTimestamp, type RunId, type SessionId, type Sha,
   isoFromDate, newRunId,
 } from "../branded.ts";
 import { isENOENT } from "../errors.ts";
@@ -36,6 +36,24 @@ export interface GuardrailTripInfo {
   entered_at: IsoTimestamp;
 }
 
+/** Records the per-run worktree ccloop drives in. Persisted so
+ *  `--continue` can recover the worktree path/branch across instances,
+ *  and so `done` knows what to fast-forward back into the user's
+ *  branch. Absent on legacy runs and on runs with `loop.use_worktree
+ *  = false`. */
+export interface WorktreeInfo {
+  /** Absolute path to the worktree directory (under `.ccloop/`). */
+  path: string;
+  /** Branch name created for this run, e.g. `ccloop/<run_id>`. */
+  branch: string;
+  /** Branch the user was on when the run started; the merge target
+   *  on `done`. Empty string if the user was in detached HEAD. */
+  original_branch: string;
+  /** SHA `original_branch` pointed at when the run started. The
+   *  fast-forward refuses if the branch has moved since. */
+  original_base_sha: Sha;
+}
+
 export interface CcloopState {
   schema_version: number;
   run_id: RunId;
@@ -53,6 +71,7 @@ export interface CcloopState {
   escalation: EscalationInfo | null;
   guardrail_trip: GuardrailTripInfo | null;
   last_failure: StepFailure | null;
+  worktree: WorktreeInfo | null;
 }
 
 export class StateError extends Error {}
@@ -75,6 +94,7 @@ export function freshState(now: Date = new Date()): CcloopState {
     escalation: null,
     guardrail_trip: null,
     last_failure: null,
+    worktree: null,
   };
 }
 
@@ -156,6 +176,7 @@ export function validateState(raw: unknown): CcloopState {
   if (r.last_failure === undefined) r.last_failure = null;
   if (r.cache_low_streak === undefined) r.cache_low_streak = 0;
   if (r.steps_since_session_reset === undefined) r.steps_since_session_reset = 0;
+  if (r.worktree === undefined) r.worktree = null;
   return r as unknown as CcloopState;
 }
 
