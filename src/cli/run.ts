@@ -448,6 +448,7 @@ export async function runRun(argv: string[]): Promise<number> {
         view.rollingCostUsd.toFixed(4),
         view.rollingTokensIn, view.rollingTokensOut,
         view.averageCacheHitRate.toFixed(3), view.cacheLowStreak,
+        view.lastContextTokens, view.contextWindowTokens,
         view.focus, view.interrupting,
         view.pause?.reason ?? "", view.pause?.until ?? "",
         view.escalation?.reason ?? "",
