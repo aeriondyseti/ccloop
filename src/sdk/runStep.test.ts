@@ -155,6 +155,53 @@ describe("runStep pause_turn continuations", () => {
   });
 });
 
+describe("post-stream throw handling", () => {
+  /** Build a queryImpl that yields scripted messages, then throws.
+   *  Mirrors the SDK behaviour where the Claude Code CLI subprocess
+   *  emits a synthetic "Prompt is too long" result message and then
+   *  exits with code 1, surfacing as a thrown Error from the
+   *  iterator's cleanup. */
+  function throwingQuery(messages: SdkMsg[], err: Error) {
+    const impl = (args: FakeQueryArgs) => {
+      void args;
+      async function* gen() {
+        for (const m of messages) yield m;
+        throw err;
+      }
+      return gen() as unknown as ReturnType<typeof import("@anthropic-ai/claude-agent-sdk").query>;
+    };
+    return impl as unknown as Parameters<typeof runStep>[0]["queryImpl"];
+  }
+
+  test("synthetic 'Prompt is too long' followed by process-exit throw → returns is_error result, not thrown sdk_init", async () => {
+    const cfg = structuredClone(DEFAULTS);
+    const overflowResult: SdkMsg = {
+      type: "result",
+      session_id: "s1",
+      subtype: "success",
+      num_turns: 1,
+      total_cost_usd: 0,
+      result: "Prompt is too long",
+      is_error: true,
+      usage: {},
+    };
+    const impl = throwingQuery(
+      [overflowResult],
+      new Error("Claude Code process exited with code 1"),
+    );
+    const r = await runStep(baseInput(cfg, impl));
+    expect(r.is_error).toBe(true);
+    expect(r.final_text).toMatch(/Prompt is too long/);
+    expect(r.subtype).toBe("success");
+  });
+
+  test("throw before any result message still propagates (genuine sdk_init failure)", async () => {
+    const cfg = structuredClone(DEFAULTS);
+    const impl = throwingQuery([], new Error("Claude Code process exited with code 1"));
+    await expect(runStep(baseInput(cfg, impl))).rejects.toThrow(/process exited/);
+  });
+});
+
 describe("effortToThinkingTokens", () => {
   test("low/medium/high/xhigh map to ascending budgets", () => {
     const low = effortToThinkingTokens("low")!;

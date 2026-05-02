@@ -87,32 +87,49 @@ export async function runStep(input: RunStepInput): Promise<StepResult> {
     const q = queryImpl({ prompt, options: sdkOptions });
 
     let lastResultUsage: NonNullableUsage | undefined;
-    for await (const msg of q) {
-      debugSink?.message(msg);
-      try {
-        input.onMessage?.(msg);
-      } catch {
-        // Observers must not break the step.
-      }
-
-      if (msg.session_id) sessionId = asSessionId(msg.session_id);
-
-      if (msg.type === "assistant") {
-        handleAssistant(msg, usage, assistantTurns, (sr) => { stopReason = sr; });
-      } else if (msg.type === "result") {
-        subtype = msg.subtype;
-        numTurns += msg.num_turns;
-        totalCost += msg.total_cost_usd;
-        lastResultUsage = msg.usage;
-        if (msg.subtype !== "success" && Array.isArray(msg.errors)) {
-          for (const e of msg.errors) errors.push(e);
+    let gotResult = false;
+    try {
+      for await (const msg of q) {
+        debugSink?.message(msg);
+        try {
+          input.onMessage?.(msg);
+        } catch {
+          // Observers must not break the step.
         }
-        if (msg.subtype === "success") resultText = msg.result;
-        // Sticky: any errored result message marks the step as errored.
-        // The synthetic "Prompt is too long" reply has subtype: "success"
-        // with is_error: true; classifyStep relies on this flag.
-        if (msg.is_error) isError = true;
+
+        if (msg.session_id) sessionId = asSessionId(msg.session_id);
+
+        if (msg.type === "assistant") {
+          handleAssistant(msg, usage, assistantTurns, (sr) => { stopReason = sr; });
+        } else if (msg.type === "result") {
+          gotResult = true;
+          subtype = msg.subtype;
+          numTurns += msg.num_turns;
+          totalCost += msg.total_cost_usd;
+          lastResultUsage = msg.usage;
+          if (msg.subtype !== "success" && Array.isArray(msg.errors)) {
+            for (const e of msg.errors) errors.push(e);
+          }
+          if (msg.subtype === "success") resultText = msg.result;
+          // Sticky: any errored result message marks the step as errored.
+          // The synthetic "Prompt is too long" reply has subtype: "success"
+          // with is_error: true; classifyStep relies on this flag.
+          if (msg.is_error) isError = true;
+        }
       }
+    } catch (err) {
+      // The Claude Code CLI subprocess exits with code 1 immediately
+      // after emitting the synthetic "Prompt is too long" result for
+      // an over-budget prompt. The SDK iterator surfaces that exit as
+      // a thrown Error AFTER the result message has already been
+      // yielded. If we let it escape, the orchestrator's catch
+      // classifies it as `sdk_init` and our context_overflow rotation
+      // path never fires — the run wedges retrying the same poisoned
+      // session. When `gotResult` is true the SDK-level call
+      // effectively completed; treat the post-stream throw as
+      // transport noise and let `classifyStep` see the is_error flag.
+      if (!gotResult) throw err;
+      errors.push((err as Error).message ?? String(err));
     }
 
     // Result-level usage as fallback if no assistant message contributed.
