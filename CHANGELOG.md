@@ -5,6 +5,15 @@ All notable changes to ccloop. Newest at the top.
 ## Unreleased
 
 ### Fixed
+- **Design events properly typed; `as any` casts removed.** The
+  design event emitter cast every `type` string to `any` and every
+  `run_id` to `"" as any` to bypass `EventBase`'s closed `EventType`
+  union and `RunId` brand. The right fix is to extend `EventType`
+  with the design lifecycle variants and widen `EventBase.run_id`
+  to `RunId | ""` (design sessions don't carry a run id). All seven
+  emitter methods now type-check without escape hatches; the JSONL
+  payload is unchanged. Also drops a stale `nowIso` import while in
+  the file.
 - **`forceAbort()` now reliably aborts the SDK in `runDesignSession`.**
   The orchestrator was passing `input.abortController` to the SDK, so
   if a caller supplied a `shutdown` signal but no separate

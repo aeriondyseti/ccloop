@@ -33,11 +33,24 @@ export type EventType =
   /** Bus-only: cadence-sleep boundaries. Lets the TUI render an
    *  "X/Y s until next step" countdown without polling. */
   | "cadence_wait_enter"
-  | "cadence_wait_exit";
+  | "cadence_wait_exit"
+  /** Design-loop lifecycle events. Same JSONL file as the build-loop
+   *  events; `run_id` is empty for design sessions because they don't
+   *  carry one. */
+  | "design_session_start"
+  | "design_phase_enter"
+  | "ask_user_asked"
+  | "ask_user_answered"
+  | "draft_edit"
+  | "design_session_accept"
+  | "design_session_abort"
+  | "design_session_end";
 
 export interface EventBase {
   ts: IsoTimestamp;
-  run_id: RunId;
+  /** Build-loop run id. Empty string on design-loop events — design
+   *  sessions don't carry a run id. */
+  run_id: RunId | "";
   step: number;
   type: EventType;
   [k: string]: unknown;
