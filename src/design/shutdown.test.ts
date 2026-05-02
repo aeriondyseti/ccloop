@@ -10,7 +10,7 @@
  *    summary turn, no last-session.md).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -181,6 +181,63 @@ describe("runDesignSession with shutdown", () => {
     });
     expect(result.outcome).toBe("aborted");
     expect(io.calls.some((c) => c.startsWith("error:"))).toBe(false);
+  });
+
+  test("summary turn produces a non-empty last-session.md on disk (VR §6)", async () => {
+    const seenPrompts: string[] = [];
+    const lastSessionPath = join(dir, ".ccloop", "design", "last-session.md");
+    const summaryBody =
+      "## Session summary\n\nDecisions: x. Open questions: y. Left off at: z.\n";
+    const io = makeAdapter({});
+    const sd = createShutdownSignal();
+
+    // Trip graceful shutdown immediately so the very first wait for
+    // user input fast-paths into the summary turn.
+    sd.requestGraceful();
+
+    // Scripted SDK: the second invocation (the summary turn) writes
+    // the last-session.md file as the real Write tool would.
+    const queryImpl = ((args: { prompt: string }) => {
+      seenPrompts.push(args.prompt);
+      const isSummaryTurn = args.prompt === SHUTDOWN_SUMMARY_PROMPT;
+      async function* gen() {
+        if (isSummaryTurn) {
+          mkdirSync(join(dir, ".ccloop", "design"), { recursive: true });
+          writeFileSync(lastSessionPath, summaryBody);
+        }
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "fake",
+          num_turns: 1,
+          total_cost_usd: 0,
+          duration_ms: 0,
+          duration_api_ms: 0,
+          is_error: false,
+          result: "",
+          usage: {
+            input_tokens: 0, output_tokens: 0,
+            cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+            server_tool_use: { web_search_requests: 0 },
+          } as never,
+          permission_denials: [],
+          modelUsage: {} as never,
+          uuid: "00000000-0000-0000-0000-000000000000",
+        } as never;
+      }
+      return gen() as never;
+    }) as never;
+
+    const result = await runDesignSession({
+      cwd: dir, config, io, queryImpl, templatePath, shutdown: sd,
+    });
+
+    expect(result.outcome).toBe("aborted");
+    expect(seenPrompts).toContain(SHUTDOWN_SUMMARY_PROMPT);
+    expect(existsSync(lastSessionPath)).toBe(true);
+    const written = readFileSync(lastSessionPath, "utf8");
+    expect(written.length).toBeGreaterThan(0);
+    expect(written).toBe(summaryBody);
   });
 
   test("happy path without shutdown does not invoke the summary prompt", async () => {
