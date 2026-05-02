@@ -76,7 +76,51 @@ All notable changes to ccloop. Newest at the top.
   now iterates every edit and denies if any path lies outside
   `designDir`. Adds the regression test that was missing.
 
+### Changed
+- **`claude.max_turns_per_step` default 50 → 20.** Each ccloop step
+  drains the SDK's per-query inner-turn budget; tool_result blocks
+  from every turn live forever in the resumed session. At 50 turns
+  per step a single step routinely persisted ~150 KB of tool_result
+  content (49 calls observed in one real run). 20 caps that at
+  ~60 KB without throttling productive work — most steps need far
+  fewer turns; ones that genuinely need more should rotate the
+  session sooner anyway. Existing installs with `ccloop.toml` left
+  on the default will see the new value; users who relied on the
+  previous 50 should set `[claude].max_turns_per_step = 50` in their
+  config to opt back in.
+- **`{{last_error}}` line cap.** The `last_failure.excerpt` field is
+  already capped to 1024 visual columns by `capExcerpt`, but
+  `string-width` counts newlines as zero-width — a dense stack
+  trace could clear the column cap and still drag in 50+ lines that
+  live forever in the resumed session. `renderLastError` now also
+  trims to the last 40 lines with an "(N earlier lines elided)"
+  marker before fencing.
+
 ### Added
+- **`ccloop design` subcommand.** A sibling to the build loop: an
+  interactive brainstorming agent that walks the user from a vague
+  idea (or an existing codebase) through vision → users → scope →
+  architecture → milestones → acceptance and produces a validated
+  `./SPEC.md` ready for the build loop to consume. Two-pane Ink TUI
+  (transcript + live `spec.draft.md`) with focus cycling, an
+  `ask_user` MCP widget for structured multi-choice questions, and
+  freeform between-turn input. Sandboxed file writes are restricted
+  to `./.ccloop/design/` via a PreToolUse hook reusing the build
+  loop's bwrap / sandbox-exec infrastructure for Bash. Graceful
+  Ctrl+C runs a final summary turn that writes
+  `./.ccloop/design/last-session.md`; second Ctrl+C within 2 s
+  force-quits. Slash commands `/accept` (validate → confirm →
+  promote → offer `ccloop build`) and `/abort`. New `[design]`
+  section in `ccloop.toml`; CLI flags `--model`, `--no-tui`. Falls
+  back to a stdio adapter when `[design].enable_tui = false` or
+  stdin/stdout aren't TTYs.
+- **`ccloop build` subcommand alias for `ccloop run`.** Symmetric
+  with `ccloop design`. Both `run` and `build` continue to work.
+- **Bare-`ccloop` auto-routing.** Invoking `ccloop` with no
+  subcommand consults `validateSpec` in CWD: a valid `./SPEC.md`
+  routes to the build loop, otherwise to the design loop. Explicit
+  `ccloop design` and `ccloop build` always honor the verb. Prints
+  help only on `--help` / `-h` / `help`.
 - **Session compaction on rotation.** The proactive rotation paths
   (step-cap and context-threshold) now summarize the expiring SDK
   session before clearing it. A one-shot query
