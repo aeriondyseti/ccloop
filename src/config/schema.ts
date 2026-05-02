@@ -9,6 +9,7 @@ export interface CcloopConfig {
   failure: FailureConfig;
   notify: NotifyConfig;
   prompt: PromptConfig;
+  design: DesignConfig;
 }
 
 export interface LoopConfig {
@@ -102,6 +103,17 @@ export interface PromptConfig {
   template_path: string;
 }
 
+export interface DesignConfig {
+  /** Model to use for design sessions (defaults to Claude Opus, independent of claude.model) */
+  model: string;
+  /** Maximum turns per SDK query call for design sessions (generous default for interactive work) */
+  max_turns: number;
+  /** Effort level (maps to maxThinkingTokens) */
+  effort: string;
+  /** Whether to show the TUI (can be disabled for non-TTY environments) */
+  enable_tui: boolean;
+}
+
 export const DEFAULTS: CcloopConfig = {
   schema_version: SCHEMA_VERSION,
   loop: {
@@ -143,6 +155,12 @@ export const DEFAULTS: CcloopConfig = {
   prompt: {
     template_path: "",
   },
+  design: {
+    model: "claude-opus-4-20250514",
+    max_turns: 100,
+    effort: "high",
+    enable_tui: true,
+  },
 };
 
 const KNOWN_KEYS: Record<string, ReadonlySet<string>> = {
@@ -151,6 +169,7 @@ const KNOWN_KEYS: Record<string, ReadonlySet<string>> = {
   failure: new Set(Object.keys(DEFAULTS.failure)),
   notify: new Set(Object.keys(DEFAULTS.notify)),
   prompt: new Set(Object.keys(DEFAULTS.prompt)),
+  design: new Set(Object.keys(DEFAULTS.design)),
 };
 
 const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
@@ -235,6 +254,7 @@ export function mergeConfig(raw: unknown): CcloopConfig {
     failure: mergeSection("failure", DEFAULTS.failure, r.failure),
     notify: mergeSection("notify", DEFAULTS.notify, r.notify),
     prompt: mergeSection("prompt", DEFAULTS.prompt, r.prompt),
+    design: mergeSection("design", DEFAULTS.design, r.design),
   };
   validateRanges(cfg);
   return cfg;
@@ -316,5 +336,10 @@ function validateRanges(cfg: CcloopConfig): void {
         `config: \`failure.backoff[${i}]\` must be a non-negative number, got ${b}`,
       );
     }
+  }
+  if (cfg.design.max_turns < 1) {
+    throw new ConfigError(
+      `config: \`design.max_turns\` must be >= 1, got ${cfg.design.max_turns}`,
+    );
   }
 }

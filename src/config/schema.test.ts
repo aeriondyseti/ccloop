@@ -93,4 +93,40 @@ describe("mergeConfig", () => {
     const cfg = mergeConfig({ loop: { max_wall_clock: "" } });
     expect(cfg.loop.max_wall_clock).toBe("");
   });
+
+  test("design config merges with defaults", () => {
+    const cfg = mergeConfig({ design: { max_turns: 50 } });
+    expect(cfg.design.max_turns).toBe(50);
+    expect(cfg.design.model).toBe(DEFAULTS.design.model);
+    expect(cfg.design.effort).toBe(DEFAULTS.design.effort);
+    expect(cfg.design.enable_tui).toBe(DEFAULTS.design.enable_tui);
+  });
+
+  test("design config has correct defaults", () => {
+    const cfg = mergeConfig(undefined);
+    expect(cfg.design.model).toBe("claude-opus-4-20250514");
+    expect(cfg.design.max_turns).toBe(100);
+    expect(cfg.design.effort).toBe("high");
+    expect(cfg.design.enable_tui).toBe(true);
+  });
+
+  test("rejects design.max_turns < 1", () => {
+    expect(() => mergeConfig({ design: { max_turns: 0 } })).toThrow(
+      /design\.max_turns.*>= 1/,
+    );
+  });
+
+  test("accepts custom design model", () => {
+    const cfg = mergeConfig({ design: { model: "claude-sonnet-4-5-20250929" } });
+    expect(cfg.design.model).toBe("claude-sonnet-4-5-20250929");
+  });
+
+  test("accepts design.enable_tui = false", () => {
+    const cfg = mergeConfig({ design: { enable_tui: false } });
+    expect(cfg.design.enable_tui).toBe(false);
+  });
+
+  test("unknown design config key errors", () => {
+    expect(() => mergeConfig({ design: { bogus: 1 } })).toThrow(/design\.bogus/);
+  });
 });

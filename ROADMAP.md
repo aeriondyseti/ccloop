@@ -130,3 +130,9 @@ deliberately scoped out of the initial build.
   where the loop converges on a passing test/lint signal rather than
   a `DONE.md` sentinel. Decide whether this is a config flag
   (`[run].mode = "brownfield"`) or implicit from project state.
+
+- **Show Claude Code TODOs in the build loop TUI.**
+
+- **Show Code Diffs in the build loop TUI.** Split the screen in the
+  build loop TUI so that the right side is dedicated to showing diffs
+  of the code as it is being edited.
