@@ -10,7 +10,7 @@
  * unreachable on production installs even if a tarball did slip; this
  * test is the packaging-side guarantee.
  */
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -20,36 +20,34 @@ interface NpmPackEntry {
 
 const REPO_ROOT = join(import.meta.dir, "..");
 
-function packDryRun(): string[] {
+let files: string[] = [];
+
+beforeAll(() => {
+  // npm pack --dry-run is the only way to know what would actually
+  // ship; cache the result across all assertions in this file rather
+  // than spawning npm three times for the same output.
   const out = spawnSync("npm", ["pack", "--dry-run", "--json"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
   });
-  if (out.status !== 0) {
-    throw new Error(`npm pack failed: ${out.stderr}`);
-  }
+  if (out.status !== 0) throw new Error(`npm pack failed: ${out.stderr}`);
   const parsed = JSON.parse(out.stdout) as NpmPackEntry[];
   if (parsed.length === 0) throw new Error("npm pack produced no entries");
-  return parsed[0]!.files.map((f) => f.path);
-}
+  files = parsed[0]!.files.map((f) => f.path);
+});
 
 describe("npm tarball contents", () => {
   test("ships no test files", () => {
-    const files = packDryRun();
-    const tests = files.filter((p) => /\.test\.(ts|tsx)$/.test(p));
-    expect(tests).toEqual([]);
+    expect(files.filter((p) => /\.test\.(ts|tsx)$/.test(p))).toEqual([]);
   });
 
   test("ships no dev-only modules", () => {
-    const files = packDryRun();
-    const dev = files.filter((p) =>
-      p === "src/cli/debug.ts" || p === "src/sdk/debugDump.ts",
-    );
-    expect(dev).toEqual([]);
+    expect(
+      files.filter((p) => p === "src/cli/debug.ts" || p === "src/sdk/debugDump.ts"),
+    ).toEqual([]);
   });
 
   test("ships core entrypoints", () => {
-    const files = packDryRun();
     for (const required of [
       "package.json",
       "README.md",
