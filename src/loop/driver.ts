@@ -24,7 +24,7 @@ import {
 import { loadPromptTemplate, renderPrompt } from "../sdk/prompt.ts";
 import { runStep } from "../sdk/runStep.ts";
 import { StreamParser } from "../sdk/streamParser.ts";
-import { type StepResult, emptyUsage } from "../sdk/types.ts";
+import { type StepResult, emptyUsage, inputContextTokens, pickContextWindow } from "../sdk/types.ts";
 import { makeApprover } from "../sandbox/approver.ts";
 import type { TurnEvent } from "../tui/types.ts";
 import { autoCommit, headDiffHash, headSha } from "./git.ts";
@@ -66,8 +66,13 @@ export type DriverEvent =
     })
   | (EventBase & {
       type: "session_rotated";
-      reason: "context_overflow" | "step_cap";
+      reason: "context_overflow" | "step_cap" | "context_threshold";
       previous_session_id: string | null;
+      /** Populated for `context_threshold` rotations so the operator
+       *  can see what tipped the watermark. Omitted for cap-based and
+       *  reactive rotations where the trigger is self-evident. */
+      context_tokens?: number;
+      context_window?: number;
     })
   | (EventBase & { type: "stream_chunk"; turn: TurnEvent })
   | (EventBase & { type: "cadence_wait_enter"; started_at: IsoTimestamp; total_ms: number })
@@ -443,6 +448,37 @@ export class LoopDriver {
         reason: "step_cap",
         previous_session_id: previous,
       });
+    }
+
+    // Proactive context rotation. The reactive context_overflow path
+    // only fires after the SDK rejects an over-budget prompt — by that
+    // point the step is already a write-off. Watching the input-side
+    // token count of the most recent step lets us drop the session
+    // before the next step inflates the prompt past the model's
+    // window. The default 0.90 watermark leaves a buffer for the next
+    // turn's output + tool results; set to 0 (or ≥1) to disable. We
+    // skip if a rotation already fired above so we don't double-emit.
+    const threshold = this.config.claude.context_rotate_threshold;
+    if (
+      state.session_id !== null &&
+      threshold > 0 && threshold <= 1
+    ) {
+      const window = pickContextWindow(this.config.claude.model);
+      const used = inputContextTokens(rec.usage);
+      if (used >= window * threshold) {
+        const previous = state.session_id;
+        state.session_id = null;
+        state.steps_since_session_reset = 0;
+        await this.emit({
+          run_id: state.run_id,
+          step: state.current_step,
+          type: "session_rotated",
+          reason: "context_threshold",
+          previous_session_id: previous,
+          context_tokens: used,
+          context_window: window,
+        });
+      }
     }
 
     const cacheWarn = trackCacheStreak(state, rec);

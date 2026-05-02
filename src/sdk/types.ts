@@ -67,3 +67,19 @@ export function cacheHitRate(u: StepUsage): number {
   if (denom <= 0) return 0;
   return u.cache_read_input_tokens / denom;
 }
+
+/** Input-side token count for one step's usage — counts what was
+ *  fed into the model, not what came back. Approximates the size of
+ *  the resumed-session prefix when this is the most recent step. */
+export function inputContextTokens(u: StepUsage): number {
+  return u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
+}
+
+/** Effective context window for the active model. Sonnet / Opus use
+ *  200K by default; the 1M-context Sonnet variant is opted into via
+ *  a model id containing "1m" (case-insensitive). Empty string falls
+ *  through to 200K so callers don't have to guard. */
+export function pickContextWindow(model: string | undefined): number {
+  if (model && /1m/i.test(model)) return 1_000_000;
+  return 200_000;
+}

@@ -704,7 +704,11 @@ function eventToLine(e: { ts: string; type: string } & Record<string, unknown>):
     case "session_rotated": {
       const prev = String(e.previous_session_id ?? "");
       const prevTail = prev ? ` (was ${prev.slice(0, 8)})` : "";
-      return `${t}  session rotated · ${String(e.reason ?? "?")}${prevTail}`;
+      const reason = String(e.reason ?? "?");
+      const tokTail = e.reason === "context_threshold" && e.context_tokens && e.context_window
+        ? ` · ${numberOr(e.context_tokens, 0)}/${numberOr(e.context_window, 0)} tokens`
+        : "";
+      return `${t}  session rotated · ${reason}${tokTail}${prevTail}`;
     }
     case "done":
       return `${t}  done · ${String(e.final_commit_sha ?? "").slice(0, 7)}`;

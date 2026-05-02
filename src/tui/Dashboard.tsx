@@ -330,8 +330,13 @@ function lifecycleBlock(e: LifecycleEntry): LifecycleBlock {
       const reason = s("reason") || "?";
       const prev = s("previous_session_id");
       const prevTail = prev ? ` (was ${prev.slice(0, 8)})` : "";
+      const tok = num("context_tokens");
+      const win = num("context_window");
+      const tokTail = reason === "context_threshold" && tok > 0 && win > 0
+        ? ` · ${tok.toLocaleString()}/${win.toLocaleString()} tokens`
+        : "";
       return { label: "system", color: "cyan",
-        text: `session rotated · ${reason}${prevTail}` };
+        text: `session rotated · ${reason}${tokTail}${prevTail}` };
     }
     case "done":
       return { label: "system", color: "green",

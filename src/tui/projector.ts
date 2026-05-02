@@ -6,6 +6,7 @@
 import type { CcloopState } from "../state/state.ts";
 import type { UsageSnapshot } from "../usage/client.ts";
 import type { StepRecord } from "../loop/stepRecord.ts";
+import { inputContextTokens, pickContextWindow } from "../sdk/types.ts";
 import type {
   FocusTarget,
   LifecycleEntry,
@@ -98,11 +99,7 @@ export function project(input: ProjectorInput): TuiViewModel {
   const avgCache = cacheRateSamples > 0 ? cacheRateSum / cacheRateSamples : 0;
 
   const lastStep = input.recent[input.recent.length - 1];
-  const lastContextTokens = lastStep
-    ? lastStep.usage.input_tokens +
-      lastStep.usage.cache_read_input_tokens +
-      lastStep.usage.cache_creation_input_tokens
-    : 0;
+  const lastContextTokens = lastStep ? inputContextTokens(lastStep.usage) : 0;
   const contextWindowTokens = pickContextWindow(input.model);
 
   return {
@@ -147,15 +144,6 @@ export function project(input: ProjectorInput): TuiViewModel {
     checklist:
       input.checklist && input.checklist.total > 0 ? input.checklist : null,
   };
-}
-
-/** Effective context window for the active model. ccloop uses Sonnet
- *  / Opus by default (200K). The 1M-context Sonnet variant is opted
- *  into via a model id containing "1m"; surface that here so the
- *  utilization bar's denominator stays accurate. */
-function pickContextWindow(model: string | undefined): number {
-  if (model && /1m/i.test(model)) return 1_000_000;
-  return 200_000;
 }
 
 /** Merge lifecycle and turn events into a single chronological list.

@@ -465,6 +465,66 @@ describe("LoopDriver.stepOnce", () => {
     expect(state.steps_since_session_reset).toBe(0);
   });
 
+  test("context_rotate_threshold proactively rotates when input tokens cross watermark", async () => {
+    cfg.claude.context_rotate_threshold = 0.90;
+    cfg.claude.max_steps_per_session = 0; // disable step cap so threshold path is exclusive
+    const paths = runtimePaths(dir);
+    // 200K window × 0.90 = 180K. Set input usage above that.
+    const heavyUsage = { ...emptyUsage(), input_tokens: 185_000, output_tokens: 100 };
+    const events: DriverEvent[] = [];
+    const bus = new EventBus<DriverEvent>();
+    bus.subscribe((e: DriverEvent) => { events.push(e); });
+    const driver = new LoopDriver(dir, paths, cfg, bus, {
+      runStep: async () => mkResult({ session_id: asSessionId("hot"), usage: heavyUsage }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.session_id).toBeNull();
+    expect(state.steps_since_session_reset).toBe(0);
+    const rot = events.find((e) => e.type === "session_rotated");
+    expect(rot).toBeDefined();
+    if (rot && rot.type === "session_rotated") {
+      expect(rot.reason).toBe("context_threshold");
+      expect(rot.context_tokens).toBe(185_000);
+      expect(rot.context_window).toBe(200_000);
+    }
+  });
+
+  test("context_rotate_threshold below watermark keeps session", async () => {
+    cfg.claude.context_rotate_threshold = 0.90;
+    cfg.claude.max_steps_per_session = 0;
+    const paths = runtimePaths(dir);
+    const lightUsage = { ...emptyUsage(), input_tokens: 10_000, output_tokens: 100 };
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({ session_id: asSessionId("alive"), usage: lightUsage }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.session_id).toBe(asSessionId("alive"));
+  });
+
+  test("context_rotate_threshold=0 disables proactive rotation", async () => {
+    cfg.claude.context_rotate_threshold = 0;
+    cfg.claude.max_steps_per_session = 0;
+    const paths = runtimePaths(dir);
+    const heavyUsage = { ...emptyUsage(), input_tokens: 199_000, output_tokens: 100 };
+    const driver = new LoopDriver(dir, paths, cfg, undefined, {
+      runStep: async () => mkResult({ session_id: asSessionId("ignored"), usage: heavyUsage }),
+      headSha: async () => asSha("a"),
+      headDiffHash: async () => null,
+      autoCommit: async () => ({ committed: true, sha: asSha("a"), subject: "s" }),
+    });
+    const state = await driver.loadOrInitState();
+    await driver.stepOnce(state);
+    expect(state.session_id).toBe(asSessionId("ignored"));
+  });
+
   test("max_steps_per_session=0 disables the cap", async () => {
     cfg.claude.max_steps_per_session = 0;
     const paths = runtimePaths(dir);

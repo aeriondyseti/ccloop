@@ -41,6 +41,14 @@ export interface ClaudeConfig {
    *  re-establishes a clean cache prefix; Claude re-reads SPEC.md /
    *  progress.md from disk on the first step of the new session. */
   max_steps_per_session: number;
+  /** Proactive context-rotation watermark, expressed as a fraction
+   *  of the model's context window (0–1). After each step, if the
+   *  most recent step's input-side token count crosses this fraction
+   *  of the window, ccloop drops the SDK session so the next step
+   *  starts fresh — getting ahead of the reactive context_overflow
+   *  rotation. Default 0.90 leaves a 10% buffer for the next turn's
+   *  output and tool results. Set to 0 (or ≥1) to disable. */
+  context_rotate_threshold: number;
   /** Specific Claude model to use. Empty string uses the SDK's
    *  current default. */
   model: string;
@@ -97,6 +105,7 @@ export const DEFAULTS: CcloopConfig = {
     max_continuations_per_step: 5,
     effort: "xhigh",
     max_steps_per_session: 30,
+    context_rotate_threshold: 0.90,
     model: "",
     fallback_model: "",
     step_timeout_seconds: 1800,
@@ -234,6 +243,11 @@ function validateRanges(cfg: CcloopConfig): void {
   if (cfg.claude.max_steps_per_session < 0) {
     throw new ConfigError(
       `config: \`claude.max_steps_per_session\` must be >= 0 (0 disables), got ${cfg.claude.max_steps_per_session}`,
+    );
+  }
+  if (cfg.claude.context_rotate_threshold < 0 || cfg.claude.context_rotate_threshold > 1) {
+    throw new ConfigError(
+      `config: \`claude.context_rotate_threshold\` must be in [0, 1] (0 disables), got ${cfg.claude.context_rotate_threshold}`,
     );
   }
   if (cfg.loop.max_steps < 0) {
