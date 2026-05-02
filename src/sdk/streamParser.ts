@@ -72,8 +72,13 @@ function blockToEvents(
       ts,
     }];
     // TodoWrite carries the agent's working plan in its `input.todos`
-    // array. Emit it as a structured `todo_state` event in addition
-    // to the generic tool_use so the TUI can render the live list.
+    // array. Emit a structured `todo_state` event in addition to the
+    // generic tool_use so the TUI can render the live list.
+    //
+    // `parseTodoList` returns `null` on shape mismatch (malformed
+    // input) → no event, prior state preserved. An empty array is
+    // distinct: it means the agent legitimately cleared its plan, so
+    // we emit `todo_state` with `[]` and let the TUI wipe.
     if (name === "TodoWrite") {
       const todos = parseTodoList(b.input);
       if (todos !== null) events.push({ kind: "todo_state", todos, ts });

@@ -141,6 +141,22 @@ describe("StreamParser", () => {
     });
   });
 
+  test("TodoWrite with empty todos array emits todo_state:[] (intentional plan clear)", () => {
+    const p = new StreamParser();
+    const out = p.consume({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use", id: "tu_clear", name: "TodoWrite",
+          input: { todos: [] },
+        }],
+      },
+    }, TS);
+    const todoEv = out.find((e) => e.kind === "todo_state");
+    expect(todoEv?.kind).toBe("todo_state");
+    if (todoEv?.kind === "todo_state") expect(todoEv.todos).toEqual([]);
+  });
+
   test("TodoWrite with malformed input falls back to bare tool_use", () => {
     const p = new StreamParser();
     const out = p.consume({
