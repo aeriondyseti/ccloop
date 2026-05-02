@@ -78,7 +78,7 @@ Pinned terms used by this spec:
       exists, load it as the starting state. Conversation history is
       **not** restored — each invocation is a fresh SDK session.
       Agent system prompt includes the current draft as context.
-- [ ] **Graceful shutdown.** Single Ctrl+C: send a final agent turn
+- [x] **Graceful shutdown.** Single Ctrl+C: send a final agent turn
       asking it to summarize the conversation into
       `./.ccloop/design/last-session.md` (decisions made, open
       questions, where the conversation left off), then exit cleanly.

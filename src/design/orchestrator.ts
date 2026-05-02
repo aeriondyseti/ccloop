@@ -31,6 +31,10 @@ import { effortToThinkingTokens } from "../sdk/runStep.ts";
 import { asSessionId, type SessionId } from "../branded.ts";
 import type { IoAdapter } from "./io.ts";
 import type { DesignSessionResult } from "./types.ts";
+import {
+  awaitInputOrShutdown, createShutdownSignal, SHUTDOWN_SUMMARY_PROMPT,
+  SHUTDOWN_TICK, type ShutdownSignal,
+} from "./shutdown.ts";
 
 type QueryImpl = typeof defaultQuery;
 
@@ -40,6 +44,11 @@ export interface RunDesignSessionInput {
   io: IoAdapter;
   /** External cancel signal — wired to SIGINT/SIGTERM. */
   abortController?: AbortController;
+  /** Graceful shutdown signal: first Ctrl+C trips `requestGraceful()`
+   *  to drive a summary-writing turn; second Ctrl+C trips
+   *  `forceAbort()` to kill the SDK mid-stream. If omitted, the
+   *  orchestrator behaves as if shutdown is never requested. */
+  shutdown?: ShutdownSignal;
   /** Test seam — defaults to the SDK's `query`. */
   queryImpl?: QueryImpl;
   /** Override path to the templates/SPEC.md scaffold (test seam). */
@@ -88,11 +97,23 @@ export async function runDesignSession(
     "specific multiple-choice questions; otherwise prefer brief prose. Keep your first message short.";
 
   const startedAt = new Date().toISOString();
+  const shutdown = input.shutdown ?? createShutdownSignal({
+    abortController: input.abortController,
+  });
+  let summaryDelivered = false;
 
   while (true) {
-    if (input.abortController?.signal.aborted) {
+    if (input.abortController?.signal.aborted || shutdown.abortSignal.aborted) {
       await finalizeAbort(events, "signal");
       return abortedResult(cwd, startedAt, totalTurns, totalCost);
+    }
+
+    // Graceful shutdown: substitute a summary turn for the next user
+    // turn. After it drains, we exit. A force-abort during the
+    // summary turn is handled by the catch block below.
+    if (shutdown.requested && !summaryDelivered) {
+      nextPrompt = SHUTDOWN_SUMMARY_PROMPT;
+      summaryDelivered = true;
     }
 
     const opts = buildSdkOptions({
@@ -113,6 +134,12 @@ export async function runDesignSession(
         }
       }
     } catch (err) {
+      // A force-abort surfaces here as an AbortError-shaped exception.
+      // Treat it as an aborted session, not an error.
+      if (input.abortController?.signal.aborted || shutdown.abortSignal.aborted) {
+        await finalizeAbort(events, "signal");
+        return abortedResult(cwd, startedAt, totalTurns, totalCost);
+      }
       const message = err instanceof Error ? err.message : String(err);
       io.showError(`SDK error: ${message}`);
       await events.sessionEnd("error");
@@ -130,8 +157,21 @@ export async function runDesignSession(
     }
     if (lastSessionId) resumeSession = lastSessionId;
 
-    // Between agent turns, hand control to the user.
-    const userInput = await io.getNextInput();
+    // If the just-completed turn was the summary, exit cleanly.
+    if (summaryDelivered) {
+      io.showInfo("Session summary written to ./.ccloop/design/last-session.md.");
+      await finalizeAbort(events, "graceful-shutdown");
+      return abortedResult(cwd, startedAt, totalTurns, totalCost);
+    }
+
+    // Between agent turns, hand control to the user — but race the
+    // wait against the shutdown signal so an idle Ctrl+C kicks
+    // straight into the summary turn.
+    const userInput = await awaitInputOrShutdown(io.getNextInput(), shutdown);
+    if (userInput === SHUTDOWN_TICK) {
+      // Top of the next iteration will install the summary prompt.
+      continue;
+    }
     if (userInput === null) {
       await finalizeAbort(events, "eof");
       return abortedResult(cwd, startedAt, totalTurns, totalCost);

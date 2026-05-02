@@ -19,6 +19,7 @@ import { createStdioAdapter } from "../design/io-stdio.ts";
 import { loadOAuthToken } from "../auth/loadToken.ts";
 import { createDesignTuiBridge } from "../tui/design-bridge.ts";
 import { DesignDashboard } from "../tui/DesignDashboard.tsx";
+import { createShutdownSignal } from "../design/shutdown.ts";
 
 interface DesignFlags {
   help: boolean;
@@ -70,10 +71,23 @@ export async function runDesign(argv: string[]): Promise<number> {
   }
 
   const abortController = new AbortController();
+  const shutdown = createShutdownSignal({ abortController });
+  const FORCE_WINDOW_MS = 2000;
+  let firstSigintAt = 0;
   const onSigint = () => {
-    // First SIGINT: best-effort cancel. Graceful summary handler
-    // lands with task #5 (design shutdown) — for now we abort.
-    abortController.abort();
+    const now = Date.now();
+    if (firstSigintAt === 0) {
+      firstSigintAt = now;
+      shutdown.requestGraceful();
+      process.stderr.write(
+        "\n[ccloop design] Ctrl+C — writing session summary; press again within 2s to force quit.\n",
+      );
+      return;
+    }
+    if (now - firstSigintAt <= FORCE_WINDOW_MS) {
+      shutdown.forceAbort();
+      process.stderr.write("\n[ccloop design] Force quit.\n");
+    }
   };
   process.on("SIGINT", onSigint);
 
@@ -97,7 +111,7 @@ export async function runDesign(argv: string[]): Promise<number> {
     );
     try {
       const result = await runDesignSession({
-        cwd, config, io: bridge.adapter, abortController,
+        cwd, config, io: bridge.adapter, abortController, shutdown,
       });
       if (result.outcome === "accepted") return 0;
       if (result.outcome === "aborted") return 130;
@@ -112,7 +126,7 @@ export async function runDesign(argv: string[]): Promise<number> {
   const io = createStdioAdapter();
   try {
     const result = await runDesignSession({
-      cwd, config, io, abortController,
+      cwd, config, io, abortController, shutdown,
     });
     if (result.outcome === "accepted") return 0;
     if (result.outcome === "aborted") return 130;
