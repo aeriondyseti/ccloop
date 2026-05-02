@@ -84,7 +84,7 @@ Pinned terms used by this spec:
       questions, where the conversation left off), then exit cleanly.
       Second Ctrl+C within 2 seconds: hard-kill, draft preserved
       as-is, no summary written.
-- [ ] **Bare `ccloop` auto-routing.** When invoked with no
+- [x] **Bare `ccloop` auto-routing.** When invoked with no
       subcommand: if `./SPEC.md` exists and passes `validateSpec`,
       run the build loop; otherwise, run the design loop. Explicit
       `ccloop design` and `ccloop build` always honor the verb
